@@ -10,6 +10,7 @@ import time
 import queue
 import rclpy
 import threading
+# import Thread
 import numpy as np
 import sdk.pid as pid
 import sdk.fps as fps
@@ -34,7 +35,7 @@ class SelfDrivingNode(Node):
         self.name = name
         self.is_running = True
         ### P비례제어 I제어: 속도의 변화를 유지해주는 제어 interval, D제어: 가속도가 너무 급격하지 않게 올라가도록?  
-        self.pid = pid.PID(0.4, 0.0, 0.05)
+        self.pid = pid.PID(0.5, 0.01, 0.08)
         self.param_init()
 
         self.fps = fps.FPS()  
@@ -70,8 +71,8 @@ class SelfDrivingNode(Node):
         self.timer.cancel()
 
         self.mecanum_pub.publish(Twist())
-        if not self.get_parameter('only_line_follow').value:
-            self.send_request(self.start_yolov5_client, Trigger.Request())
+        # if not self.get_parameter('only_line_follow').value:
+        #     self.send_request(self.start_yolov5_client, Trigger.Request())
         time.sleep(1)
         
         if 1:#self.get_parameter('start').value:
@@ -114,8 +115,8 @@ class SelfDrivingNode(Node):
         self.crosswalk_length = 0.1 + 0.3  # the length of zebra crossing and the robot
 
         self.start_slow_down = False  # slowing down sign
-        self.normal_speed = 0.1  # normal driving speed
-        self.slow_down_speed = 0.1  # slowing down speed
+        self.normal_speed = 0.2  # normal driving speed
+        self.slow_down_speed = 0.2  # slowing down speed
 
         self.traffic_signs_status = None  # record the state of the traffic lights
         self.red_loss_count = 0
@@ -229,6 +230,8 @@ class SelfDrivingNode(Node):
         self.mecanum_pub.publish(Twist())
 
     def main(self):
+        self.get_logger().info('\033[1;33m%s\033[0m' % self.is_running + "움직이는중")
+        
         while self.is_running:
             time_start = time.time()
             try:
@@ -273,6 +276,9 @@ class SelfDrivingNode(Node):
                         twist.linear.x = self.slow_down_speed
                         if time.time() - self.count_slow_down > self.crosswalk_length / twist.linear.x:
                             self.start_slow_down = False
+                            
+                            #self.get_logger().info('\033[1;32m%s\033[0m' % "slow down finished" + start_slow_down)
+                            # Thread.sleep(6)
                 else:
                     twist.linear.x = self.normal_speed  # go straight with normal speed
 
@@ -292,22 +298,22 @@ class SelfDrivingNode(Node):
                 # line following processing
                 result_image, lane_angle, lane_x = self.lane_detect(binary_image, image.copy())  # the coordinate of the line while the robot is in the middle of the lane
                 if lane_x >= 0 and not self.stop:  
-                    if lane_x > 150:  
+                    if lane_x > 120:  
                         self.count_turn += 1
                         if self.count_turn > 5 and not self.start_turn:
                             self.start_turn = True
                             self.count_turn = 0
                             self.start_turn_time_stamp = time.time()
                         if self.machine_type != 'MentorPi_Acker':
-                            twist.angular.z = -0.45  # turning speed
+                            twist.angular.z = -0.9  # turning speed
                         else:
-                            twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
+                            twist.angular.z = twist.linear.x * math.tan(-0.9) / 0.145
                     else:  # use PID algorithm to correct turns on a straight road
                         self.count_turn = 0
                         if time.time() - self.start_turn_time_stamp > 2 and self.start_turn:
                             self.start_turn = False
                         if not self.start_turn:
-                            self.pid.SetPoint = 130  # the coordinate of the line while the robot is in the middle of the lane
+                            self.pid.SetPoint = 100  # the coordinate of the line while the robot is in the middle of the lane
                             self.pid.update(lane_x)
                             if self.machine_type != 'MentorPi_Acker':
                                 twist.angular.z = common.set_range(self.pid.output, -0.1, 0.1)
