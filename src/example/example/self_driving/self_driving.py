@@ -115,8 +115,8 @@ class SelfDrivingNode(Node):
         self.crosswalk_length = 0.1 + 0.3  # the length of zebra crossing and the robot
 
         self.start_slow_down = False  # slowing down sign
-        self.normal_speed = 0.2  # normal driving speed
-        self.slow_down_speed = 0.2  # slowing down speed
+        self.normal_speed = 0.3  # normal driving speed
+        self.slow_down_speed = 0.3  # slowing down speed
 
         self.traffic_signs_status = None  # record the state of the traffic lights
         self.red_loss_count = 0
@@ -306,8 +306,12 @@ class SelfDrivingNode(Node):
                             self.start_turn_time_stamp = time.time()
                         if self.machine_type != 'MentorPi_Acker':
                             twist.angular.z = -0.9  # turning speed
+                            for i in range(4):
+                                self.get_logger().info("Ackerman")
                         else:
                             twist.angular.z = twist.linear.x * math.tan(-0.9) / 0.145
+                            for i in range(4):
+                                self.get_logger().info("Else")
                     else:  # use PID algorithm to correct turns on a straight road
                         self.count_turn = 0
                         if time.time() - self.start_turn_time_stamp > 2 and self.start_turn:
