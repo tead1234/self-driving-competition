@@ -118,6 +118,7 @@ class SelfDrivingNode(Node):
         self.normal_speed = 0.3  # normal driving speed
         self.slow_down_speed = 0.3  # slowing down speed
 
+
         self.traffic_signs_status = None  # record the state of the traffic lights
         self.red_loss_count = 0
 
