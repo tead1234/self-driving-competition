@@ -35,7 +35,7 @@ class SelfDrivingNode(Node):
         self.name = name
         self.is_running = True
         ### P비례제어 I제어: 속도의 변화를 유지해주는 제어 interval, D제어: 가속도가 너무 급격하지 않게 올라가도록?  
-        self.pid = pid.PID(0.5, 0.01, 0.08)
+        self.pid = pid.PID(0.4, 0.01, 0.09)
         self.param_init()
 
         self.fps = fps.FPS()  
@@ -196,7 +196,7 @@ class SelfDrivingNode(Node):
             time.sleep(0.38/0.2)
         elif self.machine_type == 'MentorPi_Acker':
             twist = Twist()
-            twist.linear.x = 0.15
+            twist.linear.x = 0.1
             twist.angular.z = twist.linear.x*math.tan(-0.5061)/0.145
             self.mecanum_pub.publish(twist)
             time.sleep(3)
@@ -254,7 +254,7 @@ class SelfDrivingNode(Node):
 
                 # if detecting the zebra crossing, start to slow down
                 self.get_logger().info('\033[1;33m%s\033[0m' % self.crosswalk_distance + "횡단보도까지 거리")
-                if 70 < self.crosswalk_distance and not self.start_slow_down:  # The robot starts to slow down only when it is close enough to the zebra crossing
+                if 120 < self.crosswalk_distance and not self.start_slow_down:  # The robot starts to slow down only when it is close enough to the zebra crossing
                     self.count_crosswalk += 1
                     if self.count_crosswalk == 3:  # judge multiple times to prevent false detection
                         self.count_crosswalk = 0
@@ -267,26 +267,27 @@ class SelfDrivingNode(Node):
                 if self.start_slow_down:
                     if self.traffic_signs_status is not None:
                         area = abs(self.traffic_signs_status.box[0] - self.traffic_signs_status.box[2]) * abs(self.traffic_signs_status.box[1] - self.traffic_signs_status.box[3])
-                        if self.traffic_signs_status.class_name == 'red' and area < 1000:  # If the robot detects a red traffic light, it will stop
+                        self.get_logger().info(f"red area = {area}")
+                        if self.traffic_signs_status.class_name == 'red' and area > 280:  # If the robot detects a red traffic light, it will stop
                             self.mecanum_pub.publish(Twist())
                             self.stop = True
                         elif self.traffic_signs_status.class_name == 'green':  # If the traffic light is green, the robot will slow down and pass through
-                            twist.linear.x = self.slow_down_speed
+                            twist.linear.x = self.normal_speed
                             self.stop = False
                     if not self.stop:  # In other cases where the robot is not stopped, slow down the speed and calculate the time needed to pass through the crosswalk. The time needed is equal to the length of the crosswalk divided by the driving speed
-                        twist.linear.x = self.slow_down_speed
+                        twist.linear.x = self.normal_speed
                         if time.time() - self.count_slow_down > self.crosswalk_length / twist.linear.x:
                             self.start_slow_down = False
                             
-                            #self.get_logger().info('\033[1;32m%s\033[0m' % "slow down finished" + start_slow_down)
+                            self.get_logger().info('\033[1;32m%s\033[0m' % "slow down finished")
                             # Thread.sleep(6)
                 else:
                     twist.linear.x = self.normal_speed  # go straight with normal speed
 
                 # If the robot detects a stop sign and a crosswalk, it will slow down to ensure stable recognition
-                if 0 < self.park_x and 135 < self.crosswalk_distance:
-                    twist.linear.x = self.slow_down_speed
-                    if not self.start_park and 180 < self.crosswalk_distance:  # When the robot is close enough to the crosswalk, it will start parking
+                if 0 < self.park_x and 90 < self.crosswalk_distance:
+                    # twist.linear.x = self.slow_down_speed
+                    if not self.start_park:  # When the robot is close enough to the crosswalk, it will start parking
                         self.count_park += 1  
                         if self.count_park >= 15:  
                             self.mecanum_pub.publish(Twist())  
@@ -295,6 +296,14 @@ class SelfDrivingNode(Node):
                             threading.Thread(target=self.park_action).start()
                     else:
                         self.count_park = 0  
+
+                # if self.turn_right:
+                #    twist.angular.z = -0.9
+
+                #   self.turn_right = False
+
+                #  self.mecanum_pub.publish(twist)
+
 
                 # line following processing
                 result_image, lane_angle, lane_x = self.lane_detect(binary_image, image.copy())  # the coordinate of the line while the robot is in the middle of the lane
@@ -307,12 +316,8 @@ class SelfDrivingNode(Node):
                             self.start_turn_time_stamp = time.time()
                         if self.machine_type != 'MentorPi_Acker':
                             twist.angular.z = -0.9  # turning speed
-                            for i in range(4):
-                                self.get_logger().info("Ackerman")
                         else:
                             twist.angular.z = twist.linear.x * math.tan(-0.9) / 0.145
-                            for i in range(4):
-                                self.get_logger().info("Else")
                     else:  # use PID algorithm to correct turns on a straight road
                         self.count_turn = 0
                         if time.time() - self.start_turn_time_stamp > 2 and self.start_turn:
@@ -327,7 +332,8 @@ class SelfDrivingNode(Node):
                         else:
                             if self.machine_type == 'MentorPi_Acker':
                                 twist.angular.z = 0.15 * math.tan(-0.5061) / 0.145
-                    self.mecanum_pub.publish(twist)  
+                    self.mecanum_pub.publish(twist) 
+                    
                 else:
                     self.pid.clear()
 
@@ -384,8 +390,12 @@ class SelfDrivingNode(Node):
                 elif class_name == 'right':  # obtain the right turning sign
                     self.count_right += 1
                     self.count_right_miss = 0
-                    if self.count_right >= 5:  # If it is detected multiple times, take the right turning sign to true
+                    if self.count_right >= 1:  # If it is detected multiple times, take the right turning sign to true
                         self.turn_right = True
+                        twist.angular.z = -0.9
+                        self.mecanum_pub.publish(twist)
+                        self.turn_right = False
+                        self.mecanum_pub.publish(twist)
                         self.count_right = 0
                 elif class_name == 'park':  # obtain the center coordinate of the parking sign
                     self.park_x = center[0]
