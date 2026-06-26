@@ -35,7 +35,7 @@ class SelfDrivingNode(Node):
         self.name = name
         self.is_running = True
         ### P비례제어 I제어: 속도의 변화를 유지해주는 제어 interval, D제어: 가속도가 너무 급격하지 않게 올라가도록?  
-        self.pid = pid.PID(0.4, 0.01, 0.09)
+        self.pid = pid.PID(0.3, 0.01, 0.09)
         self.param_init()
 
         self.fps = fps.FPS()  
@@ -104,6 +104,7 @@ class SelfDrivingNode(Node):
         self.count_right = 0
         self.count_right_miss = 0
         self.turn_right = False  # right turning sign
+        self.right_turn_time = 0
 
         self.last_park_detect = False
         self.count_park = 0  
@@ -188,46 +189,33 @@ class SelfDrivingNode(Node):
         self.image_queue.put(rgb_image)
     
     # parking processing
+    # machine type ACKERMAN안 경우만 남기고 싹 지움
     def park_action(self):
-        if self.machine_type == 'MentorPi_Mecanum': 
-            twist = Twist()
-            twist.linear.y = -0.2
-            self.mecanum_pub.publish(twist)
-            time.sleep(0.38/0.2)
-        elif self.machine_type == 'MentorPi_Acker':
-            twist = Twist()
-            twist.linear.x = 0.1
-            twist.angular.z = twist.linear.x*math.tan(-0.5061)/0.145
-            self.mecanum_pub.publish(twist)
-            time.sleep(3)
+        # 오른쪽으로 꺾기
+        twist = Twist()
+        twist.linear.x = 0.15
+        twist.angular.z = twist.linear.x*math.tan(-0.5061)/0.145
+        self.mecanum_pub.publish(twist)
+        time.sleep(3)
 
-            twist = Twist()
-            twist.linear.x = 0.15
-            twist.angular.z = -twist.linear.x*math.tan(-0.5061)/0.145
-            self.mecanum_pub.publish(twist)
-            time.sleep(2)
+        # 왼쪽으로 꺾기
+        twist = Twist()
+        twist.linear.x = 0.15
+        twist.angular.z = -twist.linear.x*math.tan(-0.5061)/0.145
+        self.mecanum_pub.publish(twist)
+        time.sleep(2)
 
-            twist = Twist()
-            twist.linear.x = -0.15
-            twist.angular.z = twist.linear.x*math.tan(-0.5061)/0.145
-            self.mecanum_pub.publish(twist)
-            time.sleep(1.5)
+        # 뒤로 가면서 다시 각도 맞추기
+        twist = Twist()
+        # 이 부분 때문에 뒤로 빠지는 듯?
+        # twist.linear.x = -0.15
 
-        else:
-            twist = Twist()
-            twist.angular.z = -1
-            self.mecanum_pub.publish(twist)
-            time.sleep(1.5)
-            self.mecanum_pub.publish(Twist())
-            twist = Twist()
-            twist.linear.x = 0.2
-            self.mecanum_pub.publish(twist)
-            time.sleep(0.65/0.2)
-            self.mecanum_pub.publish(Twist())
-            twist = Twist()
-            twist.angular.z = 1
-            self.mecanum_pub.publish(twist)
-            time.sleep(1.5)
+        # 양수로 바뀌면 괜찮나...
+        twist.linear.x = 0.15
+        twist.angular.z = twist.linear.x * math.tan(-0.5061)/0.145
+        self.mecanum_pub.publish(twist)
+        time.sleep(1.5)
+
         self.mecanum_pub.publish(Twist())
 
     def main(self):
@@ -285,25 +273,28 @@ class SelfDrivingNode(Node):
                     twist.linear.x = self.normal_speed  # go straight with normal speed
 
                 # If the robot detects a stop sign and a crosswalk, it will slow down to ensure stable recognition
-                if 0 < self.park_x and 90 < self.crosswalk_distance:
+                if 0 < self.park_x and 220 < self.crosswalk_distance:
                     # twist.linear.x = self.slow_down_speed
                     if not self.start_park:  # When the robot is close enough to the crosswalk, it will start parking
                         self.count_park += 1  
-                        if self.count_park >= 15:  
+                        if self.count_park >= 13:  
                             self.mecanum_pub.publish(Twist())  
                             self.start_park = True
                             self.stop = True
                             threading.Thread(target=self.park_action).start()
                     else:
-                        self.count_park = 0  
+                        self.count_park = 0
 
-                # if self.turn_right:
-                #    twist.angular.z = -0.9
-
-                #   self.turn_right = False
-
-                #  self.mecanum_pub.publish(twist)
-
+                # 우회전 기능 추가
+                # 실행이 바로 되지 않아 다른 분기 밑에 넣는 걸 고려해야 함
+                if self.turn_right:
+                    if time.time() - self.right_turn_time < 1:
+                        #twist.linear.x = 0.15
+                        twist.angular.z = -1.0
+                        self.mecanum_pub.publish(twist)
+                        continue      # lane detection skip
+                    else:
+                        self.turn_right = False
 
                 # line following processing
                 result_image, lane_angle, lane_x = self.lane_detect(binary_image, image.copy())  # the coordinate of the line while the robot is in the middle of the lane
@@ -314,10 +305,9 @@ class SelfDrivingNode(Node):
                             self.start_turn = True
                             self.count_turn = 0
                             self.start_turn_time_stamp = time.time()
-                        if self.machine_type != 'MentorPi_Acker':
-                            twist.angular.z = -0.9  # turning speed
-                        else:
-                            twist.angular.z = twist.linear.x * math.tan(-0.9) / 0.145
+        
+                        twist.angular.z = -0.9  # turning speed
+
                     else:  # use PID algorithm to correct turns on a straight road
                         self.count_turn = 0
                         if time.time() - self.start_turn_time_stamp > 2 and self.start_turn:
@@ -332,8 +322,7 @@ class SelfDrivingNode(Node):
                         else:
                             if self.machine_type == 'MentorPi_Acker':
                                 twist.angular.z = 0.15 * math.tan(-0.5061) / 0.145
-                    self.mecanum_pub.publish(twist) 
-                    
+                    self.mecanum_pub.publish(twist)  
                 else:
                     self.pid.clear()
 
@@ -390,13 +379,11 @@ class SelfDrivingNode(Node):
                 elif class_name == 'right':  # obtain the right turning sign
                     self.count_right += 1
                     self.count_right_miss = 0
-                    if self.count_right >= 1:  # If it is detected multiple times, take the right turning sign to true
+                    if self.count_right >= 4:  # If it is detected multiple times, take the right turning sign to true
                         self.turn_right = True
-                        twist.angular.z = -0.9
-                        self.mecanum_pub.publish(twist)
-                        self.turn_right = False
-                        self.mecanum_pub.publish(twist)
+                        self.right_turn_time = time.time()
                         self.count_right = 0
+
                 elif class_name == 'park':  # obtain the center coordinate of the parking sign
                     self.park_x = center[0]
                 elif class_name == 'red' or class_name == 'green':  # obtain the status of the traffic light
