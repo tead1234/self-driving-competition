@@ -76,6 +76,8 @@ class YoloV5Ros2(Node):
 
         self.show_result = self.get_parameter('show_result').value
         self.pub_result_img = self.get_parameter('pub_result_img').value
+        self.frame_skip = 3      # 3프레임에 1번만 추론 (10fps 정도)
+        self._frame_count = 0
 
     def get_node_state(self, request, response):
         response.success = True
@@ -97,6 +99,10 @@ class YoloV5Ros2(Node):
 
     def image_callback(self, msg: Image):
         # 5. Detect and publish results.
+        self._frame_count += 1
+        if self._frame_count % self.frame_skip != 0:
+            return
+
         image = self.bridge.imgmsg_to_cv2(msg, "rgb8")
         detect_result = self.yolov5.predict(image)
 
@@ -104,9 +110,8 @@ class YoloV5Ros2(Node):
         self.result_msg.header.frame_id = "camera"
         self.result_msg.header.stamp = self.get_clock().now().to_msg()
 
-        # Parse the results.
         predictions = detect_result.pred[0]
-        boxes = predictions[:, :4]  # x1, y1, x2, y2
+        boxes = predictions[:, :4]
         scores = predictions[:, 4]
         categories = predictions[:, 5]
 
