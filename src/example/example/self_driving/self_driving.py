@@ -118,7 +118,7 @@ class SelfDrivingNode(Node):
         self.objects_info = []
 
         # ===== 횡단보도/신호등 상수 (직접 조정) =====
-        self.CROSSWALK_STOP_Y = 150        # 횡단보도 중심 y픽셀이 이 값보다 크면(=가까우면) 정지
+        self.CROSSWALK_STOP_Y = 200        # 횡단보도 중심 y픽셀이 이 값보다 크면(=가까우면) 정지
         self.NO_LIGHT_TIMEOUT = 3.0        # 신호등을 한 번도 못 봤을 때 통과까지 대기(초)
         self.RED_LOSS_TOLERANCE = 5        # 신호등 깜빡임 허용 프레임 수
         self.CROSSWALK_GONE_CONFIRM = 5    # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
@@ -315,7 +315,10 @@ class SelfDrivingNode(Node):
                         skip_lane = True   # 차선 추종만 건너뜀 (루프 전체 X)
                     else:
                         self.turn_right = False
-
+                self.get_logger().info(
+    'state=%s stop=%s turn_right=%s skip=%s cw_dist=%d gone=%d' % (
+        self.crosswalk_state, self.stop, self.turn_right,
+        skip_lane, self.crosswalk_distance, self.crosswalk_gone_count))
                 # ===== 차선 추종 (정지/우회전 중이 아닐 때만) =====
                 result_image, lane_angle, lane_x = self.lane_detect(binary_image, image.copy())
 
@@ -414,8 +417,9 @@ class SelfDrivingNode(Node):
 
             if class_name == 'crosswalk':
                 # 가장 가까운(=y가 가장 큰) 횡단보도 채택
-                if center[1] > min_distance:
-                    min_distance = center[1]
+                bottom_y = i.box[3]          # 중심 대신 박스 하단
+                if bottom_y > min_distance:
+                    min_distance = bottom_y
             elif class_name == 'right':
                 seen_right = True
                 self.count_right += 1
