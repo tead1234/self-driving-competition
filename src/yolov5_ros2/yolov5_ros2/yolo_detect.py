@@ -1,6 +1,12 @@
+import os
+os.environ['OMP_NUM_THREADS'] = '2'
+os.environ['MKL_NUM_THREADS'] = '2'
+os.environ['OPENBLAS_NUM_THREADS'] = '2'
 from math import frexp
 from traceback import print_tb
 from torch import imag
+import torch
+torch.set_num_threads(2)
 from yolov5 import YOLOv5
 import rclpy
 import yolov5_ros2.fps as fps
@@ -15,7 +21,6 @@ import yaml
 #from sdk import common
 
 from yolov5_ros2.cv_tool import px2xy
-import os
 from interfaces.msg import ObjectInfo, ObjectsInfo
 
 from std_srvs.srv import Trigger
