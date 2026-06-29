@@ -295,7 +295,8 @@ class SelfDrivingNode(Node):
 
                 # ===== 주차 판정 =====
                 # (주의) 현재 주차는 횡단보도가 가까울 때만 트리거됨
-                if 0 < self.park_x and self.crosswalk_distance > self.PARK_TRIGGER_Y:
+                #if 0 < self.park_x and self.crosswalk_distance > self.PARK_TRIGGER_Y:
+                if 0 < self.park_x:
                     if not self.start_park:
                         self.count_park += 1
                         if self.count_park >= self.PARK_CONFIRM:
