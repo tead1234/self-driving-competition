@@ -357,19 +357,36 @@ class SelfDrivingNode(Node):
         self.count_right = 0
         self.count_right_miss = 0
         self.right_lost_count = 0
+        self.get_logger().info(
+            'right turn start: x=%d y=%d area=%d' % (
+                self.right_sign_center_x, self.right_sign_y, self.right_sign_area))
+
+    def prepare_right_turn(self):
+        if self.right_turn_state in ('STOPPING', 'TURNING', 'COOLDOWN'):
+            return
+        self.turn_right = False
+        self.right_turn_state = 'STOPPING'
+        self.right_stop_time_stamp = time.time()
+        self.count_right = 0
+        self.count_right_miss = 0
+        self.right_lost_count = 0
+        self.get_logger().info(
+            'right turn stop: x=%d y=%d area=%d' % (
+                self.right_sign_center_x, self.right_sign_y, self.right_sign_area))
 
     def reset_right_anchor(self):
         self.right_turn_state = 'IDLE'
         self.right_seen_close = False
         self.right_ready_seen = False
         self.right_lost_count = 0
+        self.right_stop_time_stamp = 0
         self.count_right = 0
         self.right_sign_y = 0
         self.right_sign_center_x = -1
         self.right_sign_area = 0
 
     def update_right_turn_anchor(self, right_metrics):
-        if self.right_turn_state == 'TURNING':
+        if self.right_turn_state in ('STOPPING', 'TURNING'):
             return
 
         if right_metrics is None:
@@ -381,7 +398,7 @@ class SelfDrivingNode(Node):
             if self.right_turn_state == 'APPROACH':
                 self.right_lost_count += 1
                 if self.right_ready_seen and self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
-                    self.start_right_turn()
+                    self.prepare_right_turn()
                     return
                 if self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
                     self.reset_right_anchor()
@@ -411,7 +428,7 @@ class SelfDrivingNode(Node):
             right_metrics['bottom_y'] >= self.RIGHT_APPROACH_Y and
             right_metrics['height'] >= self.RIGHT_MIN_HEIGHT and
             right_metrics['area'] >= self.RIGHT_MIN_AREA
-        )
+        ) or right_metrics['center_x'] >= self.RIGHT_CENTER_EXIT_X
         ready_to_turn = (
             right_metrics['bottom_y'] >= self.RIGHT_TURN_TRIGGER_Y and
             right_metrics['area'] >= self.RIGHT_TURN_MIN_AREA
@@ -432,8 +449,8 @@ class SelfDrivingNode(Node):
 
         if self.right_turn_state == 'APPROACH':
             self.count_right += 1
-            if self.right_ready_seen and self.count_right >= self.RIGHT_CONFIRM:
-                self.start_right_turn()
+            if self.count_right >= self.RIGHT_CONFIRM:
+                self.prepare_right_turn()
 
     # ---- 주차 기동 (Ackerman 기준, 개루프) ----
     def park_action(self):
