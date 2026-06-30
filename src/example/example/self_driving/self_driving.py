@@ -10,13 +10,11 @@ import time
 import queue
 import rclpy
 import threading
-# import Thread
 import numpy as np
 import sdk.pid as pid
 import sdk.fps as fps
 from rclpy.node import Node
 import sdk.common as common
-# from app.common import Heart
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
@@ -28,64 +26,75 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from ros_robot_controller_msgs.msg import BuzzerState, SetPWMServoState, PWMServoState
 
+
 class SelfDrivingNode(Node):
     def __init__(self, name):
         rclpy.init()
-        super().__init__(name, allow_undeclared_parameters=True, automatically_declare_parameters_from_overrides=True)
+        super().__init__(
+            name,
+            allow_undeclared_parameters=True,
+            automatically_declare_parameters_from_overrides=True,
+        )
         self.name = name
         self.is_running = True
-        ### P비례제어 I제어: 속도의 변화를 유지해주는 제어 interval, D제어: 가속도가 너무 급격하지 않게 올라가도록?  
-        self.pid = pid.PID(0.5, 0.01, 0.08)
+        # P: 비례, I: 정상상태 오차 보정, D: 급격한 변화 억제
+        self.pid = pid.PID(0.3, 0.01, 0.09)
         self.param_init()
 
-        self.fps = fps.FPS()  
+        self.fps = fps.FPS()
         self.image_queue = queue.Queue(maxsize=2)
-        self.classes = ['go', 'right', 'park', 'red', 'green', 'crosswalk']
+        self.classes = ["go", "right", "park", "red", "green", "crosswalk"]
         self.display = True
         self.bridge = CvBridge()
         self.lock = threading.RLock()
         self.colors = common.Colors()
-        # signal.signal(signal.SIGINT, self.shutdown)
-        self.machine_type = os.environ.get('MACHINE_TYPE')
+        self.machine_type = os.environ.get("MACHINE_TYPE")
         self.lane_detect = lane_detect.LaneDetector("yellow")
 
-        self.mecanum_pub = self.create_publisher(Twist, '/controller/cmd_vel', 1)
-        self.servo_state_pub = self.create_publisher(SetPWMServoState, 'ros_robot_controller/pwm_servo/set_state', 1)
-        self.result_publisher = self.create_publisher(Image, '~/image_result', 1)
+        self.mecanum_pub = self.create_publisher(Twist, "/controller/cmd_vel", 1)
+        self.servo_state_pub = self.create_publisher(
+            SetPWMServoState, "ros_robot_controller/pwm_servo/set_state", 1
+        )
+        self.result_publisher = self.create_publisher(Image, "~/image_result", 1)
 
-        self.create_service(Trigger, '~/enter', self.enter_srv_callback) # enter the game
-        self.create_service(Trigger, '~/exit', self.exit_srv_callback) # exit the game
-        self.create_service(SetBool, '~/set_running', self.set_running_srv_callback)
-        # self.heart = Heart(self.name + '/heartbeat', 5, lambda _: self.exit_srv_callback(None))
+        self.create_service(
+            Trigger, "~/enter", self.enter_srv_callback
+        )  # enter the game
+        self.create_service(Trigger, "~/exit", self.exit_srv_callback)  # exit the game
+        self.create_service(SetBool, "~/set_running", self.set_running_srv_callback)
+
         timer_cb_group = ReentrantCallbackGroup()
-        self.client = self.create_client(Trigger, '/yolov5_ros2/init_finish')
+        self.client = self.create_client(Trigger, "/yolov5_ros2/init_finish")
         self.client.wait_for_service()
-        self.start_yolov5_client = self.create_client(Trigger, '/yolov5/start', callback_group=timer_cb_group)
+        self.start_yolov5_client = self.create_client(
+            Trigger, "/yolov5/start", callback_group=timer_cb_group
+        )
         self.start_yolov5_client.wait_for_service()
-        self.stop_yolov5_client = self.create_client(Trigger, '/yolov5/stop', callback_group=timer_cb_group)
+        self.stop_yolov5_client = self.create_client(
+            Trigger, "/yolov5/stop", callback_group=timer_cb_group
+        )
         self.stop_yolov5_client.wait_for_service()
 
-        self.timer = self.create_timer(0.0, self.init_process, callback_group=timer_cb_group)
+        self.timer = self.create_timer(
+            0.0, self.init_process, callback_group=timer_cb_group
+        )
 
     def init_process(self):
         self.timer.cancel()
 
         self.mecanum_pub.publish(Twist())
-        # if not self.get_parameter('only_line_follow').value:
-        #     self.send_request(self.start_yolov5_client, Trigger.Request())
         time.sleep(1)
-        
-        if 1:#self.get_parameter('start').value:
+
+        if 1:  # self.get_parameter('start').value:
             self.display = True
             self.enter_srv_callback(Trigger.Request(), Trigger.Response())
             request = SetBool.Request()
             request.data = True
             self.set_running_srv_callback(request, SetBool.Response())
 
-        #self.park_action() 
         threading.Thread(target=self.main, daemon=True).start()
-        self.create_service(Trigger, '~/init_finish', self.get_node_state)
-        self.get_logger().info('\033[1;32m%s\033[0m' % 'start')
+        self.create_service(Trigger, "~/init_finish", self.get_node_state)
+        self.get_logger().info("\033[1;32m%s\033[0m" % "start")
 
     def param_init(self):
         self.start = False
@@ -95,35 +104,61 @@ class SelfDrivingNode(Node):
         self.have_turn_right = False
         self.detect_turn_right = False
         self.detect_far_lane = False
-        self.park_x = -1  # obtain the x-pixel coordinate of a parking sign
+        self.park_x = -1  # 주차 표지 x 픽셀 좌표 (없으면 -1)
 
         self.start_turn_time_stamp = 0
         self.count_turn = 0
-        self.start_turn = False  # start to turn
+        self.start_turn = False
 
         self.count_right = 0
         self.count_right_miss = 0
-        self.turn_right = False  # right turning sign
+        self.turn_right = False
+        self.right_turn_time = 0
 
         self.last_park_detect = False
-        self.count_park = 0  
-        self.stop = False  # stopping sign
-        self.start_park = False  # start parking sign
+        self.count_park = 0
+        self.stop = False
+        self.start_park = False
 
         self.count_crosswalk = 0
-        self.crosswalk_distance = 0  # distance to the zebra crossing
-        self.crosswalk_length = 0.1 + 0.3  # the length of zebra crossing and the robot
+        self.crosswalk_distance = 0  # 횡단보도 중심 y픽셀 (클수록 가까움)
 
-        self.start_slow_down = False  # slowing down sign
-        self.normal_speed = 0.2  # normal driving speed
-        self.slow_down_speed = 0.2  # slowing down speed
-
-        self.traffic_signs_status = None  # record the state of the traffic lights
+        self.traffic_signs_status = None  # 신호등 상태 기록
         self.red_loss_count = 0
 
         self.object_sub = None
         self.image_sub = None
         self.objects_info = []
+
+        # ===== 횡단보도/신호등 상수 (직접 조정) =====
+        self.CROSSWALK_STOP_Y = (
+            215  # box[3] 기준. 값이 클수록 횡단보도에 더 가까이 가서 정지
+        )
+        self.CROSSWALK_RELEASE_Y = 185  # 흔들림 방지용 해제 기준(디버그/상태 확인용)
+        self.CROSSWALK_STOP_CONFIRM = 2  # STOP_Y를 연속 몇 프레임 넘으면 정지할지
+        self.crosswalk_stop_count = 0  # STOP_Y 연속 확인 카운터
+
+        self.NO_LIGHT_TIMEOUT = 3.0  # 신호등을 한 번도 못 봤을 때 통과까지 대기(초)
+        self.RED_LOSS_TOLERANCE = 5  # 신호등 깜빡임 허용 프레임 수
+        self.CROSSWALK_GONE_CONFIRM = (
+            5  # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
+        )
+        self.PARK_TRIGGER_Y = 220  # 주차 트리거용 횡단보도 y픽셀 임계
+        self.PARK_CONFIRM = 13  # 주차 시작 전 연속 확인 횟수
+
+        # ===== 횡단보도 정지 튜닝용 로그 =====
+        self.CROSSWALK_LOG_START_Y = 160  # 이 값 이상부터 터미널 로그 출력
+        self.crosswalk_last_log_time = 0
+        self.CROSSWALK_LOG_INTERVAL = (
+            0.2  # 로그 출력 간격(초). 너무 많이 찍히는 것 방지
+        )
+
+        # 횡단보도 상태머신: 'NORMAL' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
+        self.crosswalk_state = "NORMAL"
+        self.stop_enter_time = 0  # STOPPED 진입 시각
+        self.crosswalk_gone_count = 0  # 횡단보도가 안 보인 연속 프레임 수
+
+        self.drive_speed = 0.3
 
     def get_node_state(self, request, response):
         response.success = True
@@ -136,12 +171,16 @@ class SelfDrivingNode(Node):
                 return future.result()
 
     def enter_srv_callback(self, request, response):
-        self.get_logger().info('\033[1;32m%s\033[0m' % "self driving enter")
+        self.get_logger().info("\033[1;32m%s\033[0m" % "self driving enter")
         with self.lock:
             self.start = False
-            camera = 'depth_cam'#self.get_parameter('depth_camera_name').value
-            self.create_subscription(Image, '/ascamera/camera_publisher/rgb0/image' , self.image_callback, 1)
-            self.create_subscription(ObjectsInfo, '/yolov5_ros2/object_detect', self.get_object_callback, 1)
+            # subscription 객체를 보관해야 exit에서 정리 가능
+            self.image_sub = self.create_subscription(
+                Image, "/ascamera/camera_publisher/rgb0/image", self.image_callback, 1
+            )
+            self.object_sub = self.create_subscription(
+                ObjectsInfo, "/yolov5_ros2/object_detect", self.get_object_callback, 1
+            )
             self.mecanum_pub.publish(Twist())
             self.enter = True
         response.success = True
@@ -149,15 +188,16 @@ class SelfDrivingNode(Node):
         return response
 
     def exit_srv_callback(self, request, response):
-        self.get_logger().info('\033[1;32m%s\033[0m' % "self driving exit")
+        self.get_logger().info("\033[1;32m%s\033[0m" % "self driving exit")
         with self.lock:
             try:
+                # ROS2에서는 destroy_subscription 사용 (unregister 아님)
                 if self.image_sub is not None:
-                    self.image_sub.unregister()
+                    self.destroy_subscription(self.image_sub)
                 if self.object_sub is not None:
-                    self.object_sub.unregister()
+                    self.destroy_subscription(self.object_sub)
             except Exception as e:
-                self.get_logger().info('\033[1;32m%s\033[0m' % str(e))
+                self.get_logger().info("\033[1;32m%s\033[0m" % str(e))
             self.mecanum_pub.publish(Twist())
         self.param_init()
         response.success = True
@@ -165,7 +205,7 @@ class SelfDrivingNode(Node):
         return response
 
     def set_running_srv_callback(self, request, response):
-        self.get_logger().info('\033[1;32m%s\033[0m' % "set_running")
+        self.get_logger().info("\033[1;32m%s\033[0m" % "set_running")
         with self.lock:
             self.start = request.data
             if not self.start:
@@ -174,64 +214,44 @@ class SelfDrivingNode(Node):
         response.message = "set_running"
         return response
 
-    def shutdown(self, signum, frame):  # press 'ctrl+c' to close the program
+    def shutdown(self, signum, frame):
         self.is_running = False
 
-    def image_callback(self, ros_image):  # callback target checking
+    def image_callback(self, ros_image):
         cv_image = self.bridge.imgmsg_to_cv2(ros_image, "rgb8")
         rgb_image = np.array(cv_image, dtype=np.uint8)
         if self.image_queue.full():
-            # if the queue is full, remove the oldest image
             self.image_queue.get()
-        # put the image into the queue
         self.image_queue.put(rgb_image)
-    
-    # parking processing
+
+    # ---- 주차 기동 (Ackerman 기준, 개루프) ----
     def park_action(self):
-        if self.machine_type == 'MentorPi_Mecanum': 
-            twist = Twist()
-            twist.linear.y = -0.2
-            self.mecanum_pub.publish(twist)
-            time.sleep(0.38/0.2)
-        elif self.machine_type == 'MentorPi_Acker':
-            twist = Twist()
-            twist.linear.x = 0.15
-            twist.angular.z = twist.linear.x*math.tan(-0.5061)/0.145
-            self.mecanum_pub.publish(twist)
-            time.sleep(3)
+        # 오른쪽으로 꺾기
+        twist = Twist()
+        twist.linear.x = 0.15
+        twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
+        self.mecanum_pub.publish(twist)
+        time.sleep(3)
 
-            twist = Twist()
-            twist.linear.x = 0.15
-            twist.angular.z = -twist.linear.x*math.tan(-0.5061)/0.145
-            self.mecanum_pub.publish(twist)
-            time.sleep(2)
+        # 왼쪽으로 꺾기
+        twist = Twist()
+        twist.linear.x = 0.15
+        twist.angular.z = -twist.linear.x * math.tan(-0.5061) / 0.145
+        self.mecanum_pub.publish(twist)
+        time.sleep(2)
 
-            twist = Twist()
-            twist.linear.x = -0.15
-            twist.angular.z = twist.linear.x*math.tan(-0.5061)/0.145
-            self.mecanum_pub.publish(twist)
-            time.sleep(1.5)
+        # 다시 각도 맞추기
+        twist = Twist()
+        twist.linear.x = 0.15
+        twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
+        self.mecanum_pub.publish(twist)
+        time.sleep(1.5)
 
-        else:
-            twist = Twist()
-            twist.angular.z = -1
-            self.mecanum_pub.publish(twist)
-            time.sleep(1.5)
-            self.mecanum_pub.publish(Twist())
-            twist = Twist()
-            twist.linear.x = 0.2
-            self.mecanum_pub.publish(twist)
-            time.sleep(0.65/0.2)
-            self.mecanum_pub.publish(Twist())
-            twist = Twist()
-            twist.angular.z = 1
-            self.mecanum_pub.publish(twist)
-            time.sleep(1.5)
         self.mecanum_pub.publish(Twist())
 
     def main(self):
-        self.get_logger().info('\033[1;33m%s\033[0m' % self.is_running + "움직이는중")
-        
+        self.get_logger().info("\033[1;33m%s\033[0m" % "self_driving main start")
+
         while self.is_running:
             time_start = time.time()
             try:
@@ -246,87 +266,214 @@ class SelfDrivingNode(Node):
             if self.start:
                 h, w = image.shape[:2]
 
-                # obtain the binary image of the lane
+                # 차선 이진화
                 binary_image = self.lane_detect.get_binary(image)
 
                 twist = Twist()
+                twist.linear.x = self.drive_speed
 
-                # if detecting the zebra crossing, start to slow down
-                self.get_logger().info('\033[1;33m%s\033[0m' % self.crosswalk_distance + "횡단보도까지 거리")
-                if 70 < self.crosswalk_distance and not self.start_slow_down:  # The robot starts to slow down only when it is close enough to the zebra crossing
-                    self.count_crosswalk += 1
-                    if self.count_crosswalk == 3:  # judge multiple times to prevent false detection
-                        self.count_crosswalk = 0
-                        self.start_slow_down = True  # sign for slowing down
-                        self.count_slow_down = time.time()  # fixing time for slowing down
-                else:  # need to detect continuously, otherwise reset
-                    self.count_crosswalk = 0
-
-                # deceleration processing
-                if self.start_slow_down:
-                    if self.traffic_signs_status is not None:
-                        area = abs(self.traffic_signs_status.box[0] - self.traffic_signs_status.box[2]) * abs(self.traffic_signs_status.box[1] - self.traffic_signs_status.box[3])
-                        if self.traffic_signs_status.class_name == 'red' and area < 1000:  # If the robot detects a red traffic light, it will stop
-                            self.mecanum_pub.publish(Twist())
-                            self.stop = True
-                        elif self.traffic_signs_status.class_name == 'green':  # If the traffic light is green, the robot will slow down and pass through
-                            twist.linear.x = self.slow_down_speed
-                            self.stop = False
-                    if not self.stop:  # In other cases where the robot is not stopped, slow down the speed and calculate the time needed to pass through the crosswalk. The time needed is equal to the length of the crosswalk divided by the driving speed
-                        twist.linear.x = self.slow_down_speed
-                        if time.time() - self.count_slow_down > self.crosswalk_length / twist.linear.x:
-                            self.start_slow_down = False
-                            
-                            #self.get_logger().info('\033[1;32m%s\033[0m' % "slow down finished" + start_slow_down)
-                            # Thread.sleep(6)
+                # ===== 횡단보도 사라짐 카운트 =====
+                if self.crosswalk_distance == 0:
+                    self.crosswalk_gone_count += 1
                 else:
-                    twist.linear.x = self.normal_speed  # go straight with normal speed
+                    self.crosswalk_gone_count = 0
 
-                # If the robot detects a stop sign and a crosswalk, it will slow down to ensure stable recognition
-                if 0 < self.park_x and 135 < self.crosswalk_distance:
-                    twist.linear.x = self.slow_down_speed
-                    if not self.start_park and 180 < self.crosswalk_distance:  # When the robot is close enough to the crosswalk, it will start parking
-                        self.count_park += 1  
-                        if self.count_park >= 15:  
-                            self.mecanum_pub.publish(Twist())  
+                # ===== 횡단보도 + 신호등 상태머신 =====
+                # crosswalk_distance는 실제 cm 거리가 아니라 YOLO crosswalk 박스의 아래쪽 y좌표(box[3])
+                # 값이 클수록 화면 아래쪽에 있다는 뜻이므로 차량이 횡단보도에 더 가까움
+                sign = (
+                    self.traffic_signs_status.class_name
+                    if self.traffic_signs_status is not None
+                    else None
+                )
+
+                # 정지 위치 튜닝용 로그: 횡단보도가 어느 정도 가까워졌을 때만 출력
+                if self.crosswalk_distance >= self.CROSSWALK_LOG_START_Y:
+                    now = time.time()
+                    if (
+                        now - self.crosswalk_last_log_time
+                        >= self.CROSSWALK_LOG_INTERVAL
+                    ):
+                        self.crosswalk_last_log_time = now
+                        self.get_logger().info(
+                            "[CW] y=%d STOP_Y=%d count=%d/%d state=%s sign=%s"
+                            % (
+                                self.crosswalk_distance,
+                                self.CROSSWALK_STOP_Y,
+                                self.crosswalk_stop_count,
+                                self.CROSSWALK_STOP_CONFIRM,
+                                self.crosswalk_state,
+                                sign,
+                            )
+                        )
+
+                if self.crosswalk_state == "NORMAL":
+                    # 한 프레임만 튀어서 STOP_Y를 넘는 경우를 막기 위해 연속 프레임 확인
+                    if self.crosswalk_distance > self.CROSSWALK_STOP_Y:
+                        self.crosswalk_stop_count += 1
+                    else:
+                        self.crosswalk_stop_count = 0
+
+                    if self.crosswalk_stop_count >= self.CROSSWALK_STOP_CONFIRM:
+                        self.crosswalk_state = "STOPPED"
+                        self.stop_enter_time = time.time()
+                        self.stop = True
+                        self.red_loss_count = 0
+                        self.get_logger().info(
+                            "========== CROSSWALK STOP y=%d STOP_Y=%d =========="
+                            % (self.crosswalk_distance, self.CROSSWALK_STOP_Y)
+                        )
+
+                elif self.crosswalk_state == "STOPPED":
+                    self.stop = True  # 기본은 정지 유지
+
+                    if sign == "green":
+                        # 초록불 -> 출발, 이 정지 이벤트 종료
+                        self.stop = False
+                        self.crosswalk_state = "PASSED"
+                        self.crosswalk_stop_count = 0
+                        self.get_logger().info(
+                            "========== GREEN GO y=%d =========="
+                            % self.crosswalk_distance
+                        )
+                    elif sign == "red":
+                        # 빨간불 -> 정지 유지, 타임아웃 리셋(빨간불 오통과 방지)
+                        self.stop = True
+                        self.stop_enter_time = time.time()
+                        self.red_loss_count = 0
+                        now = time.time()
+                        if (
+                            now - self.crosswalk_last_log_time
+                            >= self.CROSSWALK_LOG_INTERVAL
+                        ):
+                            self.crosswalk_last_log_time = now
+                            self.get_logger().info(
+                                "[CW] RED WAIT y=%d STOP_Y=%d"
+                                % (self.crosswalk_distance, self.CROSSWALK_STOP_Y)
+                            )
+                    else:
+                        # 신호등이 안 잡힘: 깜빡임인지 진짜 없는지 구분
+                        self.red_loss_count += 1
+                        if self.red_loss_count <= self.RED_LOSS_TOLERANCE:
+                            # 깜빡임으로 간주: 정지 유지, 타임아웃 리셋
+                            self.stop_enter_time = time.time()
+                        else:
+                            # 신호등이 정말 없음: 타임아웃 경과하면 통과
+                            if (
+                                time.time() - self.stop_enter_time
+                                > self.NO_LIGHT_TIMEOUT
+                            ):
+                                self.stop = False
+                                self.crosswalk_state = "PASSED"
+                                self.crosswalk_stop_count = 0
+                                self.get_logger().info(
+                                    "========== NO LIGHT TIMEOUT GO y=%d =========="
+                                    % self.crosswalk_distance
+                                )
+
+                elif self.crosswalk_state == "PASSED":
+                    # 통과 중: 두 번째 횡단보도가 보여도 멈추지 않음
+                    self.stop = False
+                    # 횡단보도 묶음이 완전히 사라지면 다음 횡단보도 대비해 잠금 해제
+                    if self.crosswalk_gone_count >= self.CROSSWALK_GONE_CONFIRM:
+                        self.crosswalk_state = "NORMAL"
+                        # 다음 횡단보도를 위해 신호등 상태도 리셋
+                        self.traffic_signs_status = None
+                        self.red_loss_count = 0
+                        self.crosswalk_stop_count = 0
+                        self.get_logger().info("========== CROSSWALK RESET ==========")
+                # ===== 주차 판정 =====
+                # (주의) 현재 주차는 횡단보도가 가까울 때만 트리거됨
+                # if 0 < self.park_x and self.crosswalk_distance > self.PARK_TRIGGER_Y:
+                if 0 < self.park_x:
+                    if not self.start_park:
+                        self.count_park += 1
+                        if self.count_park >= self.PARK_CONFIRM:
+                            self.mecanum_pub.publish(Twist())
                             self.start_park = True
                             self.stop = True
-                            threading.Thread(target=self.park_action).start()
-                    else:
-                        self.count_park = 0  
+                            threading.Thread(
+                                target=self.park_action, daemon=True
+                            ).start()
+                else:
+                    self.count_park = 0
 
-                # line following processing
-                result_image, lane_angle, lane_x = self.lane_detect(binary_image, image.copy())  # the coordinate of the line while the robot is in the middle of the lane
-                if lane_x >= 0 and not self.stop:  
-                    if lane_x > 120:  
+                # ===== 우회전 (개루프) =====
+                skip_lane = False
+                if self.turn_right:
+                    if time.time() - self.right_turn_time < 1:
+                        twist.angular.z = -1.0
+                        self.mecanum_pub.publish(twist)
+                        skip_lane = True  # 차선 추종만 건너뜀 (루프 전체 X)
+                    else:
+                        self.turn_right = False
+                self.get_logger().info(
+                    "state=%s stop=%s turn_right=%s skip=%s cw_dist=%d gone=%d"
+                    % (
+                        self.crosswalk_state,
+                        self.stop,
+                        self.turn_right,
+                        skip_lane,
+                        self.crosswalk_distance,
+                        self.crosswalk_gone_count,
+                    )
+                )
+                # ===== 차선 추종 (정지/우회전 중이 아닐 때만) =====
+                result_image, lane_angle, lane_x = self.lane_detect(
+                    binary_image, image.copy()
+                )
+
+                if self.stop:
+                    # 정지: 멈춤 명령 + PID 누적 제거
+                    self.mecanum_pub.publish(Twist())
+                    self.pid.clear()
+                elif skip_lane:
+                    # 우회전 중: 차선 추종 건너뜀 (twist는 이미 위에서 publish)
+                    pass
+                elif lane_x >= 0:
+                    if lane_x > 120:
+                        # 급커브
                         self.count_turn += 1
                         if self.count_turn > 5 and not self.start_turn:
                             self.start_turn = True
                             self.count_turn = 0
                             self.start_turn_time_stamp = time.time()
-                        if self.machine_type != 'MentorPi_Acker':
-                            twist.angular.z = -0.9  # turning speed
+                        if self.machine_type != "MentorPi_Acker":
+                            twist.angular.z = -0.9
                         else:
                             twist.angular.z = twist.linear.x * math.tan(-0.9) / 0.145
-                    else:  # use PID algorithm to correct turns on a straight road
+                    else:
+                        # 직선/완만한 보정: PID
                         self.count_turn = 0
-                        if time.time() - self.start_turn_time_stamp > 2 and self.start_turn:
+                        if (
+                            time.time() - self.start_turn_time_stamp > 2
+                            and self.start_turn
+                        ):
                             self.start_turn = False
                         if not self.start_turn:
-                            self.pid.SetPoint = 100  # the coordinate of the line while the robot is in the middle of the lane
+                            self.pid.SetPoint = 100
                             self.pid.update(lane_x)
-                            if self.machine_type != 'MentorPi_Acker':
-                                twist.angular.z = common.set_range(self.pid.output, -0.1, 0.1)
+                            if self.machine_type != "MentorPi_Acker":
+                                twist.angular.z = common.set_range(
+                                    self.pid.output, -0.1, 0.1
+                                )
                             else:
-                                twist.angular.z = twist.linear.x * math.tan(common.set_range(self.pid.output, -0.1, 0.1)) / 0.145
+                                twist.angular.z = (
+                                    twist.linear.x
+                                    * math.tan(
+                                        common.set_range(self.pid.output, -0.1, 0.1)
+                                    )
+                                    / 0.145
+                                )
                         else:
-                            if self.machine_type == 'MentorPi_Acker':
+                            if self.machine_type == "MentorPi_Acker":
                                 twist.angular.z = 0.15 * math.tan(-0.5061) / 0.145
-                    self.mecanum_pub.publish(twist)  
+                    self.mecanum_pub.publish(twist)
                 else:
+                    # 차선을 못 찾음: PID 누적 제거 (직진 관성 방지)
                     self.pid.clear()
 
-             
+                # ===== 디버그 박스 =====
                 if self.objects_info:
                     for i in self.objects_info:
                         box = i.box
@@ -340,65 +487,90 @@ class SelfDrivingNode(Node):
                             color=color,
                             label="{}:{:.2f}".format(class_name, cls_conf),
                         )
-
             else:
                 time.sleep(0.01)
 
-            
             bgr_image = cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
             if self.display:
                 self.fps.update()
                 bgr_image = self.fps.show_fps(bgr_image)
 
-            
             self.result_publisher.publish(self.bridge.cv2_to_imgmsg(bgr_image, "bgr8"))
 
-           
             time_d = 0.03 - (time.time() - time_start)
             if time_d > 0:
                 time.sleep(time_d)
+
         self.mecanum_pub.publish(Twist())
         rclpy.shutdown()
 
-
-    # Obtain the target detection result
+    # ---- 객체 감지 콜백 ----
     def get_object_callback(self, msg):
         self.objects_info = msg.objects
-        if self.objects_info == []:  # If it is not recognized, reset the variable
+        if self.objects_info == []:
+            # 아무것도 안 보이면 리셋
             self.traffic_signs_status = None
             self.crosswalk_distance = 0
-        else:
-            min_distance = 0
-            for i in self.objects_info:
-                class_name = i.class_name
-                center = (int((i.box[0] + i.box[2])/2), int((i.box[1] + i.box[3])/2))
-                
-                if class_name == 'crosswalk':  
-                    if center[1] > min_distance:  # Obtain recent y-axis pixel coordinate of the crosswalk
-                        min_distance = center[1]
-                elif class_name == 'right':  # obtain the right turning sign
-                    self.count_right += 1
-                    self.count_right_miss = 0
-                    if self.count_right >= 5:  # If it is detected multiple times, take the right turning sign to true
-                        self.turn_right = True
-                        self.count_right = 0
-                elif class_name == 'park':  # obtain the center coordinate of the parking sign
-                    self.park_x = center[0]
-                elif class_name == 'red' or class_name == 'green':  # obtain the status of the traffic light
-                    self.traffic_signs_status = i
-               
+            self.crosswalk_stop_count = 0
+            self.park_x = -1
+            self.count_right_miss += 1
+            if self.count_right_miss >= 3:
+                self.count_right = 0
+                self.count_right_miss = 0
+            return
 
-            self.get_logger().info('\033[1;32m%s\033[0m' % class_name)
-            self.crosswalk_distance = min_distance
+        min_distance = 0
+        seen_park = False
+        seen_right = False
+        seen_traffic = False
+        last_class = None
+
+        for i in self.objects_info:
+            class_name = i.class_name
+            last_class = class_name
+            center = (int((i.box[0] + i.box[2]) / 2), int((i.box[1] + i.box[3]) / 2))
+
+            if class_name == "crosswalk":
+                # 가장 가까운(=y가 가장 큰) 횡단보도 채택
+                bottom_y = i.box[3]  # 중심 대신 박스 하단
+                if bottom_y > min_distance:
+                    min_distance = bottom_y
+            elif class_name == "right":
+                seen_right = True
+                self.count_right += 1
+                self.count_right_miss = 0
+                if self.count_right >= 4:
+                    self.turn_right = True
+                    self.right_turn_time = time.time()
+                    self.count_right = 0
+            elif class_name == "park":
+                seen_park = True
+                self.park_x = center[0]
+            elif class_name == "red" or class_name == "green":
+                seen_traffic = True
+                self.traffic_signs_status = i
+
+        # 이 프레임에 안 보인 표지는 정리
+        if not seen_park:
+            self.park_x = -1
+        if not seen_traffic:
+            self.traffic_signs_status = None
+        if not seen_right:
+            self.count_right_miss += 1
+            if self.count_right_miss >= 3:
+                self.count_right = 0
+                self.count_right_miss = 0
+
+        self.crosswalk_distance = min_distance
+
 
 def main():
-    node = SelfDrivingNode('self_driving')
+    node = SelfDrivingNode("self_driving")
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     executor.spin()
     node.destroy_node()
- 
+
+
 if __name__ == "__main__":
     main()
-
-    
