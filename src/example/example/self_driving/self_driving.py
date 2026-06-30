@@ -327,6 +327,7 @@ class SelfDrivingNode(Node):
             self.count_right += 1
             if self.count_right >= self.RIGHT_CONFIRM:
                 self.prepare_right_turn()
+
     # ---- 횡단보도 박스들의 y중심으로 "별개 횡단보도" 개수 세기 ----
     # 같은 횡단보도가 여러 박스로 쪼개진 경우(y가 서로 가까움)는 1개로 묶는다.
     @staticmethod
@@ -339,118 +340,6 @@ class SelfDrivingNode(Node):
             if cur - prev > gap:   # gap 이상 벌어지면 별개 횡단보도로 카운트
                 groups += 1
         return groups
-    def get_right_box_metrics(self, box):
-        x1, y1, x2, y2 = box
-        width = abs(x2 - x1)
-        height = abs(y2 - y1)
-        return {
-            'center_x': int((x1 + x2) / 2),
-            'bottom_y': int(max(y1, y2)),
-            'height': int(height),
-            'area': int(width * height),
-        }
-
-    def start_right_turn(self):
-        self.turn_right = True
-        self.right_turn_time = time.time()
-        self.right_turn_state = 'TURNING'
-        self.count_right = 0
-        self.count_right_miss = 0
-        self.right_lost_count = 0
-        self.get_logger().info(
-            'right turn start: x=%d y=%d area=%d' % (
-                self.right_sign_center_x, self.right_sign_y, self.right_sign_area))
-
-    def prepare_right_turn(self):
-        if self.right_turn_state in ('STOPPING', 'TURNING', 'COOLDOWN'):
-            return
-        self.turn_right = False
-        self.right_turn_state = 'STOPPING'
-        self.right_stop_time_stamp = time.time()
-        self.count_right = 0
-        self.count_right_miss = 0
-        self.right_lost_count = 0
-        self.get_logger().info(
-            'right turn stop: x=%d y=%d area=%d' % (
-                self.right_sign_center_x, self.right_sign_y, self.right_sign_area))
-
-    def reset_right_anchor(self):
-        self.right_turn_state = 'IDLE'
-        self.right_seen_close = False
-        self.right_ready_seen = False
-        self.right_lost_count = 0
-        self.right_stop_time_stamp = 0
-        self.count_right = 0
-        self.right_sign_y = 0
-        self.right_sign_center_x = -1
-        self.right_sign_area = 0
-
-    def update_right_turn_anchor(self, right_metrics):
-        if self.right_turn_state in ('STOPPING', 'TURNING'):
-            return
-
-        if right_metrics is None:
-            self.right_sign_y = 0
-            self.right_sign_center_x = -1
-            self.right_sign_area = 0
-            self.count_right_miss += 1
-
-            if self.right_turn_state == 'APPROACH':
-                self.right_lost_count += 1
-                if self.right_ready_seen and self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
-                    self.prepare_right_turn()
-                    return
-                if self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
-                    self.reset_right_anchor()
-                    return
-
-            if self.right_turn_state == 'COOLDOWN':
-                if self.count_right_miss >= self.RIGHT_COOLDOWN_LOST_CONFIRM:
-                    self.reset_right_anchor()
-                    self.count_right_miss = 0
-                return
-
-            if self.count_right_miss >= 3:
-                self.count_right = 0
-                self.count_right_miss = 0
-            return
-
-        self.right_sign_y = right_metrics['bottom_y']
-        self.right_sign_center_x = right_metrics['center_x']
-        self.right_sign_area = right_metrics['area']
-        self.count_right_miss = 0
-        self.right_lost_count = 0
-
-        if self.right_turn_state == 'COOLDOWN':
-            return
-
-        close_enough = (
-            right_metrics['bottom_y'] >= self.RIGHT_APPROACH_Y and
-            right_metrics['height'] >= self.RIGHT_MIN_HEIGHT and
-            right_metrics['area'] >= self.RIGHT_MIN_AREA
-        ) or right_metrics['center_x'] >= self.RIGHT_CENTER_EXIT_X
-        ready_to_turn = (
-            right_metrics['bottom_y'] >= self.RIGHT_TURN_TRIGGER_Y and
-            right_metrics['area'] >= self.RIGHT_TURN_MIN_AREA
-        ) or right_metrics['center_x'] >= self.RIGHT_CENTER_EXIT_X
-
-        if not close_enough:
-            if self.right_turn_state != 'APPROACH':
-                self.count_right = 0
-            return
-
-        self.right_seen_close = True
-        if ready_to_turn:
-            self.right_ready_seen = True
-        if self.right_turn_state == 'IDLE':
-            self.right_turn_state = 'APPROACH'
-            self.count_right = 1
-            return
-
-        if self.right_turn_state == 'APPROACH':
-            self.count_right += 1
-            if self.count_right >= self.RIGHT_CONFIRM:
-                self.prepare_right_turn()
 
     # ---- 주차 기동 (Ackerman 기준, 개루프) ----
     def park_action(self):
@@ -565,7 +454,7 @@ class SelfDrivingNode(Node):
                 else:
                     self.count_park = 0
 
-                # ===== 우회전 (개루프) — 이번 수정에서 변경 없음 =====
+                # ===== 우회전 (bbox anchor + 개루프 회전) =====
                 skip_lane = False
                 if self.right_turn_state == 'STOPPING':
                     if time.time() - self.right_stop_time_stamp < self.RIGHT_PRE_TURN_STOP:
@@ -584,10 +473,10 @@ class SelfDrivingNode(Node):
                         self.right_turn_state = 'COOLDOWN'
                         self.right_lost_count = 0
                 self.get_logger().info(
-                    'state=%s stop=%s turn_right=%s skip=%s cw_dist=%d gone=%d '
+                    'state=%s stop=%s turn_right=%s skip=%s cw_count=%d gone=%d '
                     'right_state=%s right_x=%d right_y=%d right_area=%d' % (
                         self.crosswalk_state, self.stop, self.turn_right,
-                        skip_lane, self.crosswalk_distance, self.crosswalk_gone_count,
+                        skip_lane, self.crosswalk_count, self.crosswalk_gone_count,
                         self.right_turn_state, self.right_sign_center_x,
                         self.right_sign_y, self.right_sign_area))
                 # ===== 차선 추종 (정지/우회전 중이 아닐 때만) =====
