@@ -339,6 +339,101 @@ class SelfDrivingNode(Node):
             if cur - prev > gap:   # gap 이상 벌어지면 별개 횡단보도로 카운트
                 groups += 1
         return groups
+    def get_right_box_metrics(self, box):
+        x1, y1, x2, y2 = box
+        width = abs(x2 - x1)
+        height = abs(y2 - y1)
+        return {
+            'center_x': int((x1 + x2) / 2),
+            'bottom_y': int(max(y1, y2)),
+            'height': int(height),
+            'area': int(width * height),
+        }
+
+    def start_right_turn(self):
+        self.turn_right = True
+        self.right_turn_time = time.time()
+        self.right_turn_state = 'TURNING'
+        self.count_right = 0
+        self.count_right_miss = 0
+        self.right_lost_count = 0
+
+    def reset_right_anchor(self):
+        self.right_turn_state = 'IDLE'
+        self.right_seen_close = False
+        self.right_ready_seen = False
+        self.right_lost_count = 0
+        self.count_right = 0
+        self.right_sign_y = 0
+        self.right_sign_center_x = -1
+        self.right_sign_area = 0
+
+    def update_right_turn_anchor(self, right_metrics):
+        if self.right_turn_state == 'TURNING':
+            return
+
+        if right_metrics is None:
+            self.right_sign_y = 0
+            self.right_sign_center_x = -1
+            self.right_sign_area = 0
+            self.count_right_miss += 1
+
+            if self.right_turn_state == 'APPROACH':
+                self.right_lost_count += 1
+                if self.right_ready_seen and self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
+                    self.start_right_turn()
+                    return
+                if self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
+                    self.reset_right_anchor()
+                    return
+
+            if self.right_turn_state == 'COOLDOWN':
+                if self.count_right_miss >= self.RIGHT_COOLDOWN_LOST_CONFIRM:
+                    self.reset_right_anchor()
+                    self.count_right_miss = 0
+                return
+
+            if self.count_right_miss >= 3:
+                self.count_right = 0
+                self.count_right_miss = 0
+            return
+
+        self.right_sign_y = right_metrics['bottom_y']
+        self.right_sign_center_x = right_metrics['center_x']
+        self.right_sign_area = right_metrics['area']
+        self.count_right_miss = 0
+        self.right_lost_count = 0
+
+        if self.right_turn_state == 'COOLDOWN':
+            return
+
+        close_enough = (
+            right_metrics['bottom_y'] >= self.RIGHT_APPROACH_Y and
+            right_metrics['height'] >= self.RIGHT_MIN_HEIGHT and
+            right_metrics['area'] >= self.RIGHT_MIN_AREA
+        )
+        ready_to_turn = (
+            right_metrics['bottom_y'] >= self.RIGHT_TURN_TRIGGER_Y and
+            right_metrics['area'] >= self.RIGHT_TURN_MIN_AREA
+        ) or right_metrics['center_x'] >= self.RIGHT_CENTER_EXIT_X
+
+        if not close_enough:
+            if self.right_turn_state != 'APPROACH':
+                self.count_right = 0
+            return
+
+        self.right_seen_close = True
+        if ready_to_turn:
+            self.right_ready_seen = True
+        if self.right_turn_state == 'IDLE':
+            self.right_turn_state = 'APPROACH'
+            self.count_right = 1
+            return
+
+        if self.right_turn_state == 'APPROACH':
+            self.count_right += 1
+            if self.right_ready_seen and self.count_right >= self.RIGHT_CONFIRM:
+                self.start_right_turn()
 
     # ---- 주차 기동 (Ackerman 기준, 개루프) ----
     def park_action(self):
