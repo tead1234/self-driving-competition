@@ -108,6 +108,7 @@ class SelfDrivingNode(Node):
         self.right_seen_close = False
         self.right_ready_seen = False
         self.right_lost_count = 0
+        self.right_stop_time_stamp = 0
 
         self.last_park_detect = False
         self.count_park = 0
@@ -133,15 +134,16 @@ class SelfDrivingNode(Node):
         self.PARK_CONFIRM = 13             # 주차 시작 전 연속 확인 횟수
 
         # ===== 우회전 anchor 상수 (카메라 bbox 기반) =====
-        self.RIGHT_APPROACH_Y = 180         # 이 값부터 표지판을 가까운 anchor로 추적
-        self.RIGHT_TURN_TRIGGER_Y = 230     # 박스 하단 y가 이 값 이상이면 회전 준비 완료
-        self.RIGHT_MIN_HEIGHT = 24          # 너무 작은 원거리/오검출 bbox 제외
-        self.RIGHT_MIN_AREA = 800           # APPROACH 진입 최소 bbox 면적
-        self.RIGHT_TURN_MIN_AREA = 1200     # TURNING 진입 최소 bbox 면적
+        self.RIGHT_APPROACH_Y = 160         # 이 값부터 표지판을 가까운 anchor로 추적
+        self.RIGHT_TURN_TRIGGER_Y = 210     # 박스 하단 y가 이 값 이상이면 회전 준비 완료
+        self.RIGHT_MIN_HEIGHT = 16          # 너무 작은 원거리/오검출 bbox 제외
+        self.RIGHT_MIN_AREA = 350           # APPROACH 진입 최소 bbox 면적
+        self.RIGHT_TURN_MIN_AREA = 700      # TURNING 진입 최소 bbox 면적
         self.RIGHT_CENTER_EXIT_X = 260      # 표지판 중심이 우측 경계에 닿으면 회전 준비 완료
-        self.RIGHT_CONFIRM = 4              # 회전 준비 조건 연속 확인 횟수
+        self.RIGHT_CONFIRM = 3              # 회전 준비 조건 연속 확인 횟수
         self.RIGHT_PASS_LOST_CONFIRM = 3    # 회전 준비 후 표지판이 사라진 연속 프레임 수
         self.RIGHT_COOLDOWN_LOST_CONFIRM = 5
+        self.RIGHT_PRE_TURN_STOP = 0.25     # 우회전 직전 정지 확인 시간(초)
         self.RIGHT_TURN_DURATION = 1.0      # 실제 우회전 기동 시간(초), 실행부는 아직 개루프
 
         # 횡단보도 상태머신: 'NORMAL' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
@@ -231,19 +233,36 @@ class SelfDrivingNode(Node):
         self.count_right = 0
         self.count_right_miss = 0
         self.right_lost_count = 0
+        self.get_logger().info(
+            'right turn start: x=%d y=%d area=%d' % (
+                self.right_sign_center_x, self.right_sign_y, self.right_sign_area))
+
+    def prepare_right_turn(self):
+        if self.right_turn_state in ('STOPPING', 'TURNING', 'COOLDOWN'):
+            return
+        self.turn_right = False
+        self.right_turn_state = 'STOPPING'
+        self.right_stop_time_stamp = time.time()
+        self.count_right = 0
+        self.count_right_miss = 0
+        self.right_lost_count = 0
+        self.get_logger().info(
+            'right turn stop: x=%d y=%d area=%d' % (
+                self.right_sign_center_x, self.right_sign_y, self.right_sign_area))
 
     def reset_right_anchor(self):
         self.right_turn_state = 'IDLE'
         self.right_seen_close = False
         self.right_ready_seen = False
         self.right_lost_count = 0
+        self.right_stop_time_stamp = 0
         self.count_right = 0
         self.right_sign_y = 0
         self.right_sign_center_x = -1
         self.right_sign_area = 0
 
     def update_right_turn_anchor(self, right_metrics):
-        if self.right_turn_state == 'TURNING':
+        if self.right_turn_state in ('STOPPING', 'TURNING'):
             return
 
         if right_metrics is None:
@@ -255,7 +274,7 @@ class SelfDrivingNode(Node):
             if self.right_turn_state == 'APPROACH':
                 self.right_lost_count += 1
                 if self.right_ready_seen and self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
-                    self.start_right_turn()
+                    self.prepare_right_turn()
                     return
                 if self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
                     self.reset_right_anchor()
@@ -285,7 +304,7 @@ class SelfDrivingNode(Node):
             right_metrics['bottom_y'] >= self.RIGHT_APPROACH_Y and
             right_metrics['height'] >= self.RIGHT_MIN_HEIGHT and
             right_metrics['area'] >= self.RIGHT_MIN_AREA
-        )
+        ) or right_metrics['center_x'] >= self.RIGHT_CENTER_EXIT_X
         ready_to_turn = (
             right_metrics['bottom_y'] >= self.RIGHT_TURN_TRIGGER_Y and
             right_metrics['area'] >= self.RIGHT_TURN_MIN_AREA
@@ -306,8 +325,8 @@ class SelfDrivingNode(Node):
 
         if self.right_turn_state == 'APPROACH':
             self.count_right += 1
-            if self.right_ready_seen and self.count_right >= self.RIGHT_CONFIRM:
-                self.start_right_turn()
+            if self.count_right >= self.RIGHT_CONFIRM:
+                self.prepare_right_turn()
 
     # ---- 주차 기동 (Ackerman 기준, 개루프) ----
     def park_action(self):
@@ -424,6 +443,13 @@ class SelfDrivingNode(Node):
 
                 # ===== 우회전 (개루프) =====
                 skip_lane = False
+                if self.right_turn_state == 'STOPPING':
+                    if time.time() - self.right_stop_time_stamp < self.RIGHT_PRE_TURN_STOP:
+                        self.mecanum_pub.publish(Twist())
+                        self.pid.clear()
+                        skip_lane = True
+                    else:
+                        self.start_right_turn()
                 if self.turn_right:
                     if time.time() - self.right_turn_time < self.RIGHT_TURN_DURATION:
                         twist.angular.z = -1.0
@@ -443,13 +469,13 @@ class SelfDrivingNode(Node):
                 # ===== 차선 추종 (정지/우회전 중이 아닐 때만) =====
                 result_image, lane_angle, lane_x = self.lane_detect(binary_image, image.copy())
 
-                if self.stop:
+                if skip_lane:
+                    # 우회전 중: 위에서 발행한 회전 명령을 정지 명령으로 덮어쓰지 않음
+                    pass
+                elif self.stop:
                     # 정지: 멈춤 명령 + PID 누적 제거
                     self.mecanum_pub.publish(Twist())
                     self.pid.clear()
-                elif skip_lane:
-                    # 우회전 중: 차선 추종 건너뜀 (twist는 이미 위에서 publish)
-                    pass
                 elif lane_x >= 0:
                     if lane_x > 120:
                         # 급커브
