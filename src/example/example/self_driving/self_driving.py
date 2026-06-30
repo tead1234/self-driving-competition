@@ -108,7 +108,6 @@ class SelfDrivingNode(Node):
         self.start_park = False
 
         self.count_crosswalk = 0
-        self.crosswalk_distance = 0  # 횡단보도 중심 y픽셀 (클수록 가까움)
 
         self.traffic_signs_status = None  # 신호등 상태 기록
         self.red_loss_count = 0
@@ -118,16 +117,19 @@ class SelfDrivingNode(Node):
         self.objects_info = []
 
         # ===== 횡단보도/신호등 상수 (직접 조정) =====
-        self.CROSSWALK_STOP_Y = 200        # 횡단보도 중심 y픽셀이 이 값보다 크면(=가까우면) 정지
+        self.CROSSWALK_GAP = 60            # 박스 y중심이 이 픽셀 이상 떨어지면 "별개 횡단보도"로 봄 (실측 후 튜닝)
+        self.CROSSWALK_STOP_COUNT = 2      # 별개 횡단보도가 이 개수 이상이면 정지 절차 시작
+        self.APPROACH_DISTANCE = 0.2       # 2개 판단 후 더 전진할 거리(m) ≈ 20cm
         self.NO_LIGHT_TIMEOUT = 3.0        # 신호등을 한 번도 못 봤을 때 통과까지 대기(초)
         self.RED_LOSS_TOLERANCE = 5        # 신호등 깜빡임 허용 프레임 수
         self.CROSSWALK_GONE_CONFIRM = 5    # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
-        self.PARK_TRIGGER_Y = 220          # 주차 트리거용 횡단보도 y픽셀 임계
-        self.PARK_CONFIRM = 13             # 주차 시작 전 연속 확인 횟수
+        self.PARK_CONFIRM = 5              # 주차 시작 전 연속 확인 횟수
 
-        # 횡단보도 상태머신: 'NORMAL' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
+        # 횡단보도 상태머신: 'NORMAL' -> 'APPROACH' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
         self.crosswalk_state = 'NORMAL'
+        self.approach_enter_time = 0       # APPROACH 진입 시각
         self.stop_enter_time = 0           # STOPPED 진입 시각
+        self.crosswalk_count = 0           # 현재 프레임의 "별개 횡단보도" 개수
         self.crosswalk_gone_count = 0      # 횡단보도가 안 보인 연속 프레임 수
 
         self.drive_speed = 0.3
@@ -146,7 +148,6 @@ class SelfDrivingNode(Node):
         self.get_logger().info('\033[1;32m%s\033[0m' % "self driving enter")
         with self.lock:
             self.start = False
-            # subscription 객체를 보관해야 exit에서 정리 가능
             self.image_sub = self.create_subscription(
                 Image, '/ascamera/camera_publisher/rgb0/image', self.image_callback, 1)
             self.object_sub = self.create_subscription(
@@ -161,7 +162,6 @@ class SelfDrivingNode(Node):
         self.get_logger().info('\033[1;32m%s\033[0m' % "self driving exit")
         with self.lock:
             try:
-                # ROS2에서는 destroy_subscription 사용 (unregister 아님)
                 if self.image_sub is not None:
                     self.destroy_subscription(self.image_sub)
                 if self.object_sub is not None:
@@ -194,23 +194,33 @@ class SelfDrivingNode(Node):
             self.image_queue.get()
         self.image_queue.put(rgb_image)
 
+    # ---- 횡단보도 박스들의 y중심으로 "별개 횡단보도" 개수 세기 ----
+    # 같은 횡단보도가 여러 박스로 쪼개진 경우(y가 서로 가까움)는 1개로 묶는다.
+    @staticmethod
+    def count_distinct_crosswalks(y_centers, gap):
+        if not y_centers:
+            return 0
+        ys = sorted(y_centers)
+        groups = 1
+        for prev, cur in zip(ys, ys[1:]):
+            if cur - prev > gap:   # gap 이상 벌어지면 별개 횡단보도로 카운트
+                groups += 1
+        return groups
+
     # ---- 주차 기동 (Ackerman 기준, 개루프) ----
     def park_action(self):
-        # 오른쪽으로 꺾기
         twist = Twist()
         twist.linear.x = 0.15
         twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
         self.mecanum_pub.publish(twist)
         time.sleep(3)
 
-        # 왼쪽으로 꺾기
         twist = Twist()
         twist.linear.x = 0.15
         twist.angular.z = -twist.linear.x * math.tan(-0.5061) / 0.145
         self.mecanum_pub.publish(twist)
         time.sleep(2)
 
-        # 다시 각도 맞추기
         twist = Twist()
         twist.linear.x = 0.15
         twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
@@ -236,22 +246,32 @@ class SelfDrivingNode(Node):
             if self.start:
                 h, w = image.shape[:2]
 
-                # 차선 이진화
                 binary_image = self.lane_detect.get_binary(image)
 
                 twist = Twist()
                 twist.linear.x = self.drive_speed
 
-                # ===== 횡단보도 사라짐 카운트 =====
-                if self.crosswalk_distance == 0:
+                # ===== 횡단보도 사라짐 카운트 (개수 기반) =====
+                if self.crosswalk_count == 0:
                     self.crosswalk_gone_count += 1
                 else:
                     self.crosswalk_gone_count = 0
 
                 # ===== 횡단보도 + 신호등 상태머신 =====
                 if self.crosswalk_state == 'NORMAL':
-                    # 가장 가까운 횡단보도가 정지 임계를 넘으면 정지
-                    if self.crosswalk_distance > self.CROSSWALK_STOP_Y:
+                    # 별개 횡단보도가 2개 이상 보이면 즉시 APPROACH 시작
+                    if self.crosswalk_count >= self.CROSSWALK_STOP_COUNT:
+                        self.crosswalk_state = 'APPROACH'
+                        self.approach_enter_time = time.time()
+                        self.stop = False   # 아직 정지 아님, 차선 추종으로 전진
+
+                elif self.crosswalk_state == 'APPROACH':
+                    # 2개 판단 후 20cm만큼 더 전진 (차선 추종이 주행 담당)
+                    approach_time = self.APPROACH_DISTANCE / self.drive_speed   # 0.2/0.3 ≈ 0.67s
+                    if time.time() - self.approach_enter_time < approach_time:
+                        self.stop = False   # 계속 전진
+                    else:
+                        # 다 왔으면 정지하고 신호 판정 시작
                         self.crosswalk_state = 'STOPPED'
                         self.stop_enter_time = time.time()
                         self.stop = True
@@ -263,11 +283,9 @@ class SelfDrivingNode(Node):
                         if self.traffic_signs_status is not None else None
 
                     if sign == 'green':
-                        # 초록불 -> 출발, 이 정지 이벤트 종료
                         self.stop = False
                         self.crosswalk_state = 'PASSED'
                     elif sign == 'red':
-                        # 빨간불 -> 정지 유지, 타임아웃 리셋(빨간불 오통과 방지)
                         self.stop = True
                         self.stop_enter_time = time.time()
                         self.red_loss_count = 0
@@ -275,27 +293,22 @@ class SelfDrivingNode(Node):
                         # 신호등이 안 잡힘: 깜빡임인지 진짜 없는지 구분
                         self.red_loss_count += 1
                         if self.red_loss_count <= self.RED_LOSS_TOLERANCE:
-                            # 깜빡임으로 간주: 정지 유지, 타임아웃 리셋
-                            self.stop_enter_time = time.time()
+                            self.stop_enter_time = time.time()   # 깜빡임 간주, 타임아웃 리셋
                         else:
-                            # 신호등이 정말 없음: 타임아웃 경과하면 통과
                             if time.time() - self.stop_enter_time > self.NO_LIGHT_TIMEOUT:
                                 self.stop = False
                                 self.crosswalk_state = 'PASSED'
 
                 elif self.crosswalk_state == 'PASSED':
-                    # 통과 중: 두 번째 횡단보도가 보여도 멈추지 않음
+                    # 통과 중: 횡단보도가 보여도 멈추지 않음
                     self.stop = False
-                    # 횡단보도 묶음이 완전히 사라지면 다음 횡단보도 대비해 잠금 해제
+                    # 횡단보도가 완전히 사라지면 다음을 위해 잠금 해제
                     if self.crosswalk_gone_count >= self.CROSSWALK_GONE_CONFIRM:
                         self.crosswalk_state = 'NORMAL'
-                        # 다음 횡단보도를 위해 신호등 상태도 리셋
                         self.traffic_signs_status = None
                         self.red_loss_count = 0
 
                 # ===== 주차 판정 =====
-                # (주의) 현재 주차는 횡단보도가 가까울 때만 트리거됨
-                #if 0 < self.park_x and self.crosswalk_distance > self.PARK_TRIGGER_Y:
                 if 0 < self.park_x:
                     if not self.start_park:
                         self.count_park += 1
@@ -307,32 +320,31 @@ class SelfDrivingNode(Node):
                 else:
                     self.count_park = 0
 
-                # ===== 우회전 (개루프) =====
+                # ===== 우회전 (개루프) — 이번 수정에서 변경 없음 =====
                 skip_lane = False
                 if self.turn_right:
                     if time.time() - self.right_turn_time < 1:
                         twist.angular.z = -1.0
                         self.mecanum_pub.publish(twist)
-                        skip_lane = True   # 차선 추종만 건너뜀 (루프 전체 X)
+                        skip_lane = True
                     else:
                         self.turn_right = False
+
                 self.get_logger().info(
-    'state=%s stop=%s turn_right=%s skip=%s cw_dist=%d gone=%d' % (
-        self.crosswalk_state, self.stop, self.turn_right,
-        skip_lane, self.crosswalk_distance, self.crosswalk_gone_count))
-                # ===== 차선 추종 (정지/우회전 중이 아닐 때만) =====
+                    'state=%s stop=%s turn_right=%s skip=%s cw_count=%d gone=%d' % (
+                        self.crosswalk_state, self.stop, self.turn_right,
+                        skip_lane, self.crosswalk_count, self.crosswalk_gone_count))
+
+                # ===== 차선 추종 =====
                 result_image, lane_angle, lane_x = self.lane_detect(binary_image, image.copy())
 
                 if self.stop:
-                    # 정지: 멈춤 명령 + PID 누적 제거
                     self.mecanum_pub.publish(Twist())
                     self.pid.clear()
                 elif skip_lane:
-                    # 우회전 중: 차선 추종 건너뜀 (twist는 이미 위에서 publish)
-                    pass
+                    pass   # 우회전 중: twist는 위에서 이미 publish
                 elif lane_x >= 0:
                     if lane_x > 120:
-                        # 급커브
                         self.count_turn += 1
                         if self.count_turn > 5 and not self.start_turn:
                             self.start_turn = True
@@ -343,7 +355,6 @@ class SelfDrivingNode(Node):
                         else:
                             twist.angular.z = twist.linear.x * math.tan(-0.9) / 0.145
                     else:
-                        # 직선/완만한 보정: PID
                         self.count_turn = 0
                         if time.time() - self.start_turn_time_stamp > 2 and self.start_turn:
                             self.start_turn = False
@@ -360,7 +371,6 @@ class SelfDrivingNode(Node):
                                 twist.angular.z = 0.15 * math.tan(-0.5061) / 0.145
                     self.mecanum_pub.publish(twist)
                 else:
-                    # 차선을 못 찾음: PID 누적 제거 (직진 관성 방지)
                     self.pid.clear()
 
                 # ===== 디버그 박스 =====
@@ -395,9 +405,8 @@ class SelfDrivingNode(Node):
     def get_object_callback(self, msg):
         self.objects_info = msg.objects
         if self.objects_info == []:
-            # 아무것도 안 보이면 리셋
             self.traffic_signs_status = None
-            self.crosswalk_distance = 0
+            self.crosswalk_count = 0
             self.park_x = -1
             self.count_right_miss += 1
             if self.count_right_miss >= 3:
@@ -405,22 +414,17 @@ class SelfDrivingNode(Node):
                 self.count_right_miss = 0
             return
 
-        min_distance = 0
+        crosswalk_ys = []      # 횡단보도 박스들의 y중심 모음
         seen_park = False
         seen_right = False
         seen_traffic = False
-        last_class = None
 
         for i in self.objects_info:
             class_name = i.class_name
-            last_class = class_name
             center = (int((i.box[0] + i.box[2]) / 2), int((i.box[1] + i.box[3]) / 2))
 
             if class_name == 'crosswalk':
-                # 가장 가까운(=y가 가장 큰) 횡단보도 채택
-                bottom_y = i.box[3]          # 중심 대신 박스 하단
-                if bottom_y > min_distance:
-                    min_distance = bottom_y
+                crosswalk_ys.append(center[1])
             elif class_name == 'right':
                 seen_right = True
                 self.count_right += 1
@@ -436,7 +440,14 @@ class SelfDrivingNode(Node):
                 seen_traffic = True
                 self.traffic_signs_status = i
 
-        # 이 프레임에 안 보인 표지는 정리
+        # 별개 횡단보도 개수 산출 (쪼개진 박스는 1개로 묶음)
+        self.crosswalk_count = self.count_distinct_crosswalks(crosswalk_ys, self.CROSSWALK_GAP)
+
+        # 디버그: 실제 y중심 분포 확인용 (gap 튜닝에 사용)
+        if crosswalk_ys:
+            self.get_logger().info('crosswalk distinct=%d ys=%s'
+                                   % (self.crosswalk_count, str(sorted(crosswalk_ys))))
+
         if not seen_park:
             self.park_x = -1
         if not seen_traffic:
@@ -446,8 +457,6 @@ class SelfDrivingNode(Node):
             if self.count_right_miss >= 3:
                 self.count_right = 0
                 self.count_right_miss = 0
-
-        self.crosswalk_distance = min_distance
 
 
 def main():
