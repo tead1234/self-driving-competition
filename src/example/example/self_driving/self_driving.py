@@ -114,6 +114,8 @@ class SelfDrivingNode(Node):
         self.count_right_miss = 0
         self.turn_right = False
         self.right_turn_time = 0
+        self.right_turn_done = False  # 우회전 동작이 끝났는지
+        self.right_turn_finish_time = 0  # 우회전 종료 시각
 
         self.last_park_detect = False
         self.count_park = 0
@@ -144,7 +146,14 @@ class SelfDrivingNode(Node):
             5  # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
         )
         self.PARK_TRIGGER_Y = 220  # 주차 트리거용 횡단보도 y픽셀 임계
-        self.PARK_CONFIRM = 13  # 주차 시작 전 연속 확인 횟수
+        self.PARK_CONFIRM = 13  # 주차 시작 전 연속 확인 횟수 유지
+
+        # ===== 우회전 이후 주차 진입 안정화 =====
+        self.PARK_AFTER_RIGHT_DELAY = 0.5  # 우회전 종료 후 최소 대기 시간(초)
+        self.LANE_REACQUIRE_CONFIRM = (
+            3  # 우회전 후 차선을 연속 몇 프레임 잡아야 주차 허용할지
+        )
+        self.lane_reacquire_count = 0  # 우회전 후 차선 재검출 카운터
 
         # ===== 횡단보도 정지 튜닝용 로그 =====
         self.CROSSWALK_LOG_START_Y = 160  # 이 값 이상부터 터미널 로그 출력
@@ -248,6 +257,8 @@ class SelfDrivingNode(Node):
         time.sleep(1.5)
 
         self.mecanum_pub.publish(Twist())
+        self.stop = True
+        self.get_logger().info("========== PARK FINISHED ==========")
 
     def main(self):
         self.get_logger().info("\033[1;33m%s\033[0m" % "self_driving main start")
@@ -307,7 +318,11 @@ class SelfDrivingNode(Node):
                             )
                         )
 
-                if self.crosswalk_state == "NORMAL":
+                if self.start_park:
+                    # 주차 동작 중에는 횡단보도/신호등 정지 로직이 park_action 명령을 방해하지 않게 함
+                    self.stop = False
+
+                elif self.crosswalk_state == "NORMAL":
                     # 한 프레임만 튀어서 STOP_Y를 넘는 경우를 막기 위해 연속 프레임 확인
                     if self.crosswalk_distance > self.CROSSWALK_STOP_Y:
                         self.crosswalk_stop_count += 1
@@ -382,22 +397,6 @@ class SelfDrivingNode(Node):
                         self.red_loss_count = 0
                         self.crosswalk_stop_count = 0
                         self.get_logger().info("========== CROSSWALK RESET ==========")
-                # ===== 주차 판정 =====
-                # (주의) 현재 주차는 횡단보도가 가까울 때만 트리거됨
-                # if 0 < self.park_x and self.crosswalk_distance > self.PARK_TRIGGER_Y:
-                if 0 < self.park_x:
-                    if not self.start_park:
-                        self.count_park += 1
-                        if self.count_park >= self.PARK_CONFIRM:
-                            self.mecanum_pub.publish(Twist())
-                            self.start_park = True
-                            self.stop = True
-                            threading.Thread(
-                                target=self.park_action, daemon=True
-                            ).start()
-                else:
-                    self.count_park = 0
-
                 # ===== 우회전 (개루프) =====
                 skip_lane = False
                 if self.turn_right:
@@ -407,12 +406,20 @@ class SelfDrivingNode(Node):
                         skip_lane = True  # 차선 추종만 건너뜀 (루프 전체 X)
                     else:
                         self.turn_right = False
+                        self.right_turn_done = True
+                        self.right_turn_finish_time = time.time()
+                        self.lane_reacquire_count = 0
+                        self.get_logger().info(
+                            "========== RIGHT TURN FINISHED =========="
+                        )
                 self.get_logger().info(
-                    "state=%s stop=%s turn_right=%s skip=%s cw_dist=%d gone=%d"
+                    "state=%s stop=%s turn_right=%s right_done=%s park=%s skip=%s cw_dist=%d gone=%d"
                     % (
                         self.crosswalk_state,
                         self.stop,
                         self.turn_right,
+                        self.right_turn_done,
+                        self.start_park,
                         skip_lane,
                         self.crosswalk_distance,
                         self.crosswalk_gone_count,
@@ -423,7 +430,61 @@ class SelfDrivingNode(Node):
                     binary_image, image.copy()
                 )
 
-                if self.stop:
+                # ===== 우회전 이후 주차 진입 조건 =====
+                # 1) 우회전이 끝났고
+                # 2) 우회전 직후 너무 빨리 park를 보지 않도록 약간 기다리고
+                # 3) 차선을 다시 안정적으로 잡은 뒤에만
+                # 4) park 표지판을 PARK_CONFIRM 프레임 연속 확인하면 주차 시작
+                if self.right_turn_done and not self.turn_right and lane_x >= 0:
+                    self.lane_reacquire_count += 1
+                elif not self.right_turn_done:
+                    self.lane_reacquire_count = 0
+
+                park_delay_ok = self.right_turn_done and (
+                    time.time() - self.right_turn_finish_time
+                    >= self.PARK_AFTER_RIGHT_DELAY
+                )
+                lane_ready = self.lane_reacquire_count >= self.LANE_REACQUIRE_CONFIRM
+                park_allowed = park_delay_ok and lane_ready and not self.start_park
+
+                if 0 < self.park_x and park_allowed:
+                    self.count_park += 1
+                    self.get_logger().info(
+                        "[PARK] seen count=%d/%d lane_count=%d/%d park_x=%d"
+                        % (
+                            self.count_park,
+                            self.PARK_CONFIRM,
+                            self.lane_reacquire_count,
+                            self.LANE_REACQUIRE_CONFIRM,
+                            self.park_x,
+                        )
+                    )
+
+                    if self.count_park >= self.PARK_CONFIRM:
+                        self.mecanum_pub.publish(Twist())
+                        self.start_park = True
+                        self.stop = False
+                        self.count_park = 0
+                        self.get_logger().info("========== PARK START ==========")
+                        threading.Thread(target=self.park_action, daemon=True).start()
+                else:
+                    if 0 < self.park_x and not park_allowed:
+                        self.get_logger().info(
+                            "[PARK] ignored right_done=%s delay_ok=%s lane_ready=%s lane_x=%d park_x=%d"
+                            % (
+                                self.right_turn_done,
+                                park_delay_ok,
+                                lane_ready,
+                                lane_x,
+                                self.park_x,
+                            )
+                        )
+                    self.count_park = 0
+
+                if self.start_park:
+                    # 주차 스레드가 /controller/cmd_vel을 직접 publish 중이므로 main 루프에서는 간섭하지 않음
+                    pass
+                elif self.stop:
                     # 정지: 멈춤 명령 + PID 누적 제거
                     self.mecanum_pub.publish(Twist())
                     self.pid.clear()
