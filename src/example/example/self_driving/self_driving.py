@@ -101,6 +101,13 @@ class SelfDrivingNode(Node):
         self.count_right_miss = 0
         self.turn_right = False
         self.right_turn_time = 0
+        self.right_sign_y = 0
+        self.right_sign_center_x = -1
+        self.right_sign_area = 0
+        self.right_turn_state = 'IDLE'
+        self.right_seen_close = False
+        self.right_ready_seen = False
+        self.right_lost_count = 0
 
         self.last_park_detect = False
         self.count_park = 0
@@ -124,6 +131,18 @@ class SelfDrivingNode(Node):
         self.CROSSWALK_GONE_CONFIRM = 5    # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
         self.PARK_TRIGGER_Y = 220          # 주차 트리거용 횡단보도 y픽셀 임계
         self.PARK_CONFIRM = 13             # 주차 시작 전 연속 확인 횟수
+
+        # ===== 우회전 anchor 상수 (카메라 bbox 기반) =====
+        self.RIGHT_APPROACH_Y = 180         # 이 값부터 표지판을 가까운 anchor로 추적
+        self.RIGHT_TURN_TRIGGER_Y = 230     # 박스 하단 y가 이 값 이상이면 회전 준비 완료
+        self.RIGHT_MIN_HEIGHT = 24          # 너무 작은 원거리/오검출 bbox 제외
+        self.RIGHT_MIN_AREA = 800           # APPROACH 진입 최소 bbox 면적
+        self.RIGHT_TURN_MIN_AREA = 1200     # TURNING 진입 최소 bbox 면적
+        self.RIGHT_CENTER_EXIT_X = 260      # 표지판 중심이 우측 경계에 닿으면 회전 준비 완료
+        self.RIGHT_CONFIRM = 4              # 회전 준비 조건 연속 확인 횟수
+        self.RIGHT_PASS_LOST_CONFIRM = 3    # 회전 준비 후 표지판이 사라진 연속 프레임 수
+        self.RIGHT_COOLDOWN_LOST_CONFIRM = 5
+        self.RIGHT_TURN_DURATION = 1.0      # 실제 우회전 기동 시간(초), 실행부는 아직 개루프
 
         # 횡단보도 상태머신: 'NORMAL' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
         self.crosswalk_state = 'NORMAL'
@@ -193,6 +212,102 @@ class SelfDrivingNode(Node):
         if self.image_queue.full():
             self.image_queue.get()
         self.image_queue.put(rgb_image)
+
+    def get_right_box_metrics(self, box):
+        x1, y1, x2, y2 = box
+        width = abs(x2 - x1)
+        height = abs(y2 - y1)
+        return {
+            'center_x': int((x1 + x2) / 2),
+            'bottom_y': int(max(y1, y2)),
+            'height': int(height),
+            'area': int(width * height),
+        }
+
+    def start_right_turn(self):
+        self.turn_right = True
+        self.right_turn_time = time.time()
+        self.right_turn_state = 'TURNING'
+        self.count_right = 0
+        self.count_right_miss = 0
+        self.right_lost_count = 0
+
+    def reset_right_anchor(self):
+        self.right_turn_state = 'IDLE'
+        self.right_seen_close = False
+        self.right_ready_seen = False
+        self.right_lost_count = 0
+        self.count_right = 0
+        self.right_sign_y = 0
+        self.right_sign_center_x = -1
+        self.right_sign_area = 0
+
+    def update_right_turn_anchor(self, right_metrics):
+        if self.right_turn_state == 'TURNING':
+            return
+
+        if right_metrics is None:
+            self.right_sign_y = 0
+            self.right_sign_center_x = -1
+            self.right_sign_area = 0
+            self.count_right_miss += 1
+
+            if self.right_turn_state == 'APPROACH':
+                self.right_lost_count += 1
+                if self.right_ready_seen and self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
+                    self.start_right_turn()
+                    return
+                if self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
+                    self.reset_right_anchor()
+                    return
+
+            if self.right_turn_state == 'COOLDOWN':
+                if self.count_right_miss >= self.RIGHT_COOLDOWN_LOST_CONFIRM:
+                    self.reset_right_anchor()
+                    self.count_right_miss = 0
+                return
+
+            if self.count_right_miss >= 3:
+                self.count_right = 0
+                self.count_right_miss = 0
+            return
+
+        self.right_sign_y = right_metrics['bottom_y']
+        self.right_sign_center_x = right_metrics['center_x']
+        self.right_sign_area = right_metrics['area']
+        self.count_right_miss = 0
+        self.right_lost_count = 0
+
+        if self.right_turn_state == 'COOLDOWN':
+            return
+
+        close_enough = (
+            right_metrics['bottom_y'] >= self.RIGHT_APPROACH_Y and
+            right_metrics['height'] >= self.RIGHT_MIN_HEIGHT and
+            right_metrics['area'] >= self.RIGHT_MIN_AREA
+        )
+        ready_to_turn = (
+            right_metrics['bottom_y'] >= self.RIGHT_TURN_TRIGGER_Y and
+            right_metrics['area'] >= self.RIGHT_TURN_MIN_AREA
+        ) or right_metrics['center_x'] >= self.RIGHT_CENTER_EXIT_X
+
+        if not close_enough:
+            if self.right_turn_state != 'APPROACH':
+                self.count_right = 0
+            return
+
+        self.right_seen_close = True
+        if ready_to_turn:
+            self.right_ready_seen = True
+        if self.right_turn_state == 'IDLE':
+            self.right_turn_state = 'APPROACH'
+            self.count_right = 1
+            return
+
+        if self.right_turn_state == 'APPROACH':
+            self.count_right += 1
+            if self.right_ready_seen and self.count_right >= self.RIGHT_CONFIRM:
+                self.start_right_turn()
 
     # ---- 주차 기동 (Ackerman 기준, 개루프) ----
     def park_action(self):
@@ -310,16 +425,21 @@ class SelfDrivingNode(Node):
                 # ===== 우회전 (개루프) =====
                 skip_lane = False
                 if self.turn_right:
-                    if time.time() - self.right_turn_time < 1:
+                    if time.time() - self.right_turn_time < self.RIGHT_TURN_DURATION:
                         twist.angular.z = -1.0
                         self.mecanum_pub.publish(twist)
                         skip_lane = True   # 차선 추종만 건너뜀 (루프 전체 X)
                     else:
                         self.turn_right = False
+                        self.right_turn_state = 'COOLDOWN'
+                        self.right_lost_count = 0
                 self.get_logger().info(
-    'state=%s stop=%s turn_right=%s skip=%s cw_dist=%d gone=%d' % (
-        self.crosswalk_state, self.stop, self.turn_right,
-        skip_lane, self.crosswalk_distance, self.crosswalk_gone_count))
+                    'state=%s stop=%s turn_right=%s skip=%s cw_dist=%d gone=%d '
+                    'right_state=%s right_x=%d right_y=%d right_area=%d' % (
+                        self.crosswalk_state, self.stop, self.turn_right,
+                        skip_lane, self.crosswalk_distance, self.crosswalk_gone_count,
+                        self.right_turn_state, self.right_sign_center_x,
+                        self.right_sign_y, self.right_sign_area))
                 # ===== 차선 추종 (정지/우회전 중이 아닐 때만) =====
                 result_image, lane_angle, lane_x = self.lane_detect(binary_image, image.copy())
 
@@ -399,21 +519,16 @@ class SelfDrivingNode(Node):
             self.traffic_signs_status = None
             self.crosswalk_distance = 0
             self.park_x = -1
-            self.count_right_miss += 1
-            if self.count_right_miss >= 3:
-                self.count_right = 0
-                self.count_right_miss = 0
+            self.update_right_turn_anchor(None)
             return
 
         min_distance = 0
         seen_park = False
-        seen_right = False
         seen_traffic = False
-        last_class = None
+        right_metrics = None
 
         for i in self.objects_info:
             class_name = i.class_name
-            last_class = class_name
             center = (int((i.box[0] + i.box[2]) / 2), int((i.box[1] + i.box[3]) / 2))
 
             if class_name == 'crosswalk':
@@ -422,13 +537,9 @@ class SelfDrivingNode(Node):
                 if bottom_y > min_distance:
                     min_distance = bottom_y
             elif class_name == 'right':
-                seen_right = True
-                self.count_right += 1
-                self.count_right_miss = 0
-                if self.count_right >= 4:
-                    self.turn_right = True
-                    self.right_turn_time = time.time()
-                    self.count_right = 0
+                metrics = self.get_right_box_metrics(i.box)
+                if right_metrics is None or metrics['area'] > right_metrics['area']:
+                    right_metrics = metrics
             elif class_name == 'park':
                 seen_park = True
                 self.park_x = center[0]
@@ -441,11 +552,7 @@ class SelfDrivingNode(Node):
             self.park_x = -1
         if not seen_traffic:
             self.traffic_signs_status = None
-        if not seen_right:
-            self.count_right_miss += 1
-            if self.count_right_miss >= 3:
-                self.count_right = 0
-                self.count_right_miss = 0
+        self.update_right_turn_anchor(right_metrics)
 
         self.crosswalk_distance = min_distance
 
