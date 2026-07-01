@@ -151,10 +151,12 @@ class SelfDrivingNode(Node):
         self.PARK_CONFIRM = 1              # 주차 시작 전 연속 확인 횟수
 
         # ===== 우회전 크기 판정 상수 (느슨한 쪽 사용) =====
-        self.RIGHT_TRIGGER_Y = 160         # 박스 하단 y가 이 값 이상
-        self.RIGHT_TRIGGER_AREA = 350      # 박스 면적이 이 값 이상
+        self.RIGHT_TRIGGER_Y = 60         # 박스 하단 y가 이 값 이상
+        self.RIGHT_TRIGGER_AREA = 100      # 박스 면적이 이 값 이상
         self.RIGHT_TURN_DURATION = 1.0     # 우회전 기동 시간(초), 개루프
-
+        self.RIGHT_APPROACH_DISTANCE = 0.2   # 회전 전 전진 거리(m), 실측으로 조정
+        self.right_approaching = False       # 회전 전 전진 중
+        self.right_approach_start = 0
         # 횡단보도 상태머신: 'NORMAL' -> 'APPROACH' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
         self.crosswalk_state = "NORMAL"
         self.approach_enter_time = 0
@@ -427,8 +429,18 @@ class SelfDrivingNode(Node):
                 # 우회전 표지를 (크기 조건 만족하며) 한 번이라도 봤고(right_seen),
                 # 횡단보도 정지가 풀리면(stop=False) 그때 회전 시작.
                 skip_lane = False
-                if self.right_seen and not self.stop and not self.turn_right:
-                    self.start_right_turn()
+                # 정지가 풀렸고 우회전 표지를 봤으면 → 먼저 전진 단계 시작
+                if self.right_seen and not self.stop and not self.turn_right and not self.right_approaching:
+                    self.right_approaching = True
+                    self.right_approach_start = time.time()
+
+                # 전진 단계: 정해진 거리만큼 차선 추종으로 전진 후 회전 시작
+                if self.right_approaching:
+                    approach_time = self.RIGHT_APPROACH_DISTANCE / self.drive_speed
+                    if time.time() - self.right_approach_start >= approach_time:
+                        self.right_approaching = False
+                        self.start_right_turn()
+                    # 전진 중에는 skip_lane을 걸지 않음 → 아래 차선 추종이 전진 담당
 
                 if self.turn_right:
                     if time.time() - self.right_turn_time < self.RIGHT_TURN_DURATION:
@@ -436,18 +448,15 @@ class SelfDrivingNode(Node):
                         self.mecanum_pub.publish(twist)
                         skip_lane = True
                     else:
-                        # 회전 완료: 기억 리셋
                         self.turn_right = False
                         self.right_seen = False
+                        self.right_approaching = False
                         self.led_control("turn_end")
 
                 self.get_logger().info(
-                    "state=%s stop=%s turn_right=%s right_seen=%s skip=%s cw_count=%d gone=%d "
-                    "right_x=%d right_y=%d right_area=%d"
+                    "turn_right=%s right_seen=%s"
                     % (
-                        self.crosswalk_state, self.stop, self.turn_right, self.right_seen,
-                        skip_lane, self.crosswalk_count, self.crosswalk_gone_count,
-                        self.right_sign_center_x, self.right_sign_y, self.right_sign_area,
+                        self.turn_right, self.right_seen
                     )
                 )
 
