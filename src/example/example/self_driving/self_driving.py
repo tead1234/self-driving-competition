@@ -92,6 +92,7 @@ class SelfDrivingNode(Node):
         self.detect_turn_right = False
         self.detect_far_lane = False
         self.park_x = -1  # 주차 표지 x 픽셀 좌표 (없으면 -1)
+        self.park_area = 0  # 주차 표지 bbox 면적
 
         self.start_turn_time_stamp = 0
         self.count_turn = 0
@@ -371,16 +372,8 @@ class SelfDrivingNode(Node):
                 self.park_completed = True
                 return False
 
-        if self.park_phase == 0:
-            twist.linear.x = 0.15
-            twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
-        elif self.park_phase == 1:
-            twist.linear.x = 0.15
-            twist.angular.z = -twist.linear.x * math.tan(-0.5061) / 0.145
-        else:
-            twist.linear.x = 0.15
-            twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
-
+        twist.linear.x = 0
+        twist.linear.y = 0.2
         self.mecanum_pub.publish(twist)
         return True
 
@@ -458,15 +451,15 @@ class SelfDrivingNode(Node):
                         self.red_loss_count = 0
 
                 # ===== 주차 판정 =====
-                if 0 < self.park_x:
+                if 0 < self.park_x and self.park_area >= 1500:
                     if not self.start_park and not self.park_completed:
                         self.count_park += 1
                         if self.count_park >= self.PARK_CONFIRM:
                             self.start_parking_sequence()
                         else:
                             self.get_logger().info(
-                                'park detected: count=%d/%d x=%d' % (
-                                    self.count_park, self.PARK_CONFIRM, self.park_x))
+                                'park detected: count=%d/%d x=%d area=%d' % (
+                                    self.count_park, self.PARK_CONFIRM, self.park_x, self.park_area))
                 else:
                     if self.count_park > 0:
                         self.get_logger().info(
@@ -577,6 +570,7 @@ class SelfDrivingNode(Node):
             self.traffic_signs_status = None
             self.crosswalk_count = 0
             self.park_x = -1
+            self.park_area = 0
             self.update_right_turn_anchor(None)
             return
 
@@ -598,8 +592,9 @@ class SelfDrivingNode(Node):
             elif class_name == 'park':
                 seen_park = True
                 self.park_x = center[0]
+                self.park_area = int(abs((i.box[2] - i.box[0]) * (i.box[3] - i.box[1])))
                 self.get_logger().info(
-                    '\033[1;34m%s\033[0m' % ('park detected: x=%d box=' % center[0] + str(i.box)))
+                    '\033[1;34m%s\033[0m' % ('park detected: x=%d area=%d box=' % (center[0], self.park_area) + str(i.box)))
             elif class_name == 'red' or class_name == 'green':
                 seen_traffic = True
                 self.traffic_signs_status = i
@@ -612,6 +607,7 @@ class SelfDrivingNode(Node):
 
         if not seen_park:
             self.park_x = -1
+            self.park_area = 0
         if not seen_traffic:
             self.traffic_signs_status = None
         self.update_right_turn_anchor(right_metrics)
