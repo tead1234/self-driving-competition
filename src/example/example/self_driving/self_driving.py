@@ -154,7 +154,7 @@ class SelfDrivingNode(Node):
         self.RIGHT_TRIGGER_Y = 60         # 박스 하단 y가 이 값 이상
         self.RIGHT_TRIGGER_AREA = 100      # 박스 면적이 이 값 이상
         self.RIGHT_TURN_DURATION = 1.0     # 우회전 기동 시간(초), 개루프
-        self.RIGHT_APPROACH_DISTANCE = 0.2   # 회전 전 전진 거리(m), 실측으로 조정
+        self.RIGHT_APPROACH_DISTANCE = 0.4   # 회전 전 전진 거리(m), 실측으로 조정
         self.right_approaching = False       # 회전 전 전진 중
         self.right_approach_start = 0
         # 횡단보도 상태머신: 'NORMAL' -> 'APPROACH' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
@@ -582,9 +582,9 @@ class SelfDrivingNode(Node):
                 % (self.crosswalk_count, str(sorted(crosswalk_ys)))
             )
 
-        if not seen_park:
-            self.park_x = -1
-            self.park_area = 0
+        # if not seen_park:
+        #     self.park_x = -1
+        #     self.park_area = 0
         if not seen_traffic:
             self.traffic_signs_status = None
 
