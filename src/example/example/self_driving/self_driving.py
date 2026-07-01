@@ -114,6 +114,9 @@ class SelfDrivingNode(Node):
         self.count_park = 0
         self.stop = False
         self.start_park = False
+        self.park_phase = None
+        self.park_phase_start_time = 0.0
+        self.park_completed = False
 
         self.count_crosswalk = 0
 
@@ -340,27 +343,46 @@ class SelfDrivingNode(Node):
                 groups += 1
         return groups
 
-    # ---- 주차 기동 (Ackerman 기준, 개루프) ----
-    def park_action(self):
-        twist = Twist()
-        twist.linear.x = 0.15
-        twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
-        self.mecanum_pub.publish(twist)
-        time.sleep(3)
+    # ---- 주차 기동 (메인 루프에서 순차 실행) ----
+    def start_parking_sequence(self):
+        self.park_phase = 0
+        self.park_phase_start_time = time.time()
+        self.park_completed = False
+        self.start_park = True
+        self.stop = True
+        self.count_park = 0
+        self.get_logger().info('\033[1;31m%s\033[0m' % 'PARK ACTION START')
 
-        twist = Twist()
-        twist.linear.x = 0.15
-        twist.angular.z = -twist.linear.x * math.tan(-0.5061) / 0.145
-        self.mecanum_pub.publish(twist)
-        time.sleep(2)
+    def update_parking_sequence(self, twist):
+        if not self.start_park or self.park_completed:
+            return False
 
-        twist = Twist()
-        twist.linear.x = 0.15
-        twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
-        self.mecanum_pub.publish(twist)
-        time.sleep(1.5)
+        if self.park_phase is None:
+            self.mecanum_pub.publish(Twist())
+            self.park_completed = True
+            return False
 
-        self.mecanum_pub.publish(Twist())
+        durations = [3.0, 2.0, 1.5]
+        if time.time() - self.park_phase_start_time >= durations[self.park_phase]:
+            self.park_phase += 1
+            self.park_phase_start_time = time.time()
+            if self.park_phase >= len(durations):
+                self.mecanum_pub.publish(Twist())
+                self.park_completed = True
+                return False
+
+        if self.park_phase == 0:
+            twist.linear.x = 0.15
+            twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
+        elif self.park_phase == 1:
+            twist.linear.x = 0.15
+            twist.angular.z = -twist.linear.x * math.tan(-0.5061) / 0.145
+        else:
+            twist.linear.x = 0.15
+            twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
+
+        self.mecanum_pub.publish(twist)
+        return True
 
     def main(self):
         self.get_logger().info('\033[1;33m%s\033[0m' % "self_driving main start")
@@ -437,15 +459,10 @@ class SelfDrivingNode(Node):
 
                 # ===== 주차 판정 =====
                 if 0 < self.park_x:
-                    if not self.start_park:
+                    if not self.start_park and not self.park_completed:
                         self.count_park += 1
                         if self.count_park >= self.PARK_CONFIRM:
-                            self.mecanum_pub.publish(Twist())
-                            self.start_park = True
-                            self.stop = True
-                            self.get_logger().info(
-                                '\033[1;31m%s\033[0m' % 'PARK ACTION START')
-                            threading.Thread(target=self.park_action, daemon=True).start()
+                            self.start_parking_sequence()
                         else:
                             self.get_logger().info(
                                 'park detected: count=%d/%d x=%d' % (
@@ -456,11 +473,16 @@ class SelfDrivingNode(Node):
                             'park lost: count reset from %d to 0' % self.count_park)
                     self.count_park = 0
 
+                # ===== 주차 기동 =====
+                skip_lane = False
+                if self.start_park and not self.park_completed:
+                    self.stop = True
+                    skip_lane = self.update_parking_sequence(twist)
+
                 # ===== 우회전 (bbox anchor + 개루프 회전) =====
                 # 회전 준비(right_pending)가 됐고 횡단보도 정지가 풀리면(stop=False) 그때 회전 시작.
                 # STOPPING 단계 없음: 횡단보도에서 이미 한 번 정지했으므로 추가 정지 안 함.
-                skip_lane = False
-                if self.right_pending and not self.stop and not self.turn_right:
+                if not skip_lane and self.right_pending and not self.stop and not self.turn_right:
                     self.start_right_turn()
 
                 if self.turn_right:
