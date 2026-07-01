@@ -353,13 +353,12 @@ class SelfDrivingNode(Node):
 
         twist = Twist()
 
-        twist.linear.x = 0.0
-        twist.linear.y = 0.1
+        twist.linear.y = 0.2
 
         self.mecanum_pub.publish(twist)
-        time.sleep(2)
+        time.sleep(1)
 
-        return True
+        self.mecanum_pub.publish(Twist())
 
     def main(self):
         self.get_logger().info('\033[1;33m%s\033[0m' % "self_driving main start")
