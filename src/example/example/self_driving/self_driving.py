@@ -473,8 +473,7 @@ class SelfDrivingNode(Node):
 
                 # ===== 차선 추종 (정지/우회전 중이 아닐 때만) =====
                 result_image, lane_angle, lane_x = self.lane_detect(binary_image, image.copy())
-                self.get_logger().info('lane_x=%s start_turn=%s count_turn=%d'
-    % (str(lane_x), self.start_turn, self.count_turn))
+
                 if skip_lane:
                     # 우회전 중: 회전 명령을 정지 명령으로 덮지 않음
                     pass
