@@ -345,36 +345,20 @@ class SelfDrivingNode(Node):
         return groups
 
     # ---- 주차 기동 (메인 루프에서 순차 실행) ----
-    def start_parking_sequence(self):
-        self.park_phase = 0
-        self.park_phase_start_time = time.time()
-        self.park_completed = False
+    def park_action(self):
         self.start_park = True
         self.stop = True
         self.count_park = 0
         self.get_logger().info('\033[1;31m%s\033[0m' % 'PARK ACTION START')
 
-    def update_parking_sequence(self, twist):
-        if not self.start_park or self.park_completed:
-            return False
+        twist = Twist()
 
-        if self.park_phase is None:
-            self.mecanum_pub.publish(Twist())
-            self.park_completed = True
-            return False
+        twist.linear.x = 0.0
+        twist.linear.y = 0.1
 
-        durations = [3.0, 2.0, 1.5]
-        if time.time() - self.park_phase_start_time >= durations[self.park_phase]:
-            self.park_phase += 1
-            self.park_phase_start_time = time.time()
-            if self.park_phase >= len(durations):
-                self.mecanum_pub.publish(Twist())
-                self.park_completed = True
-                return False
-
-        twist.linear.x = 0
-        twist.linear.y = 0.2
         self.mecanum_pub.publish(twist)
+        time.sleep(2)
+        
         return True
 
     def main(self):
@@ -451,26 +435,17 @@ class SelfDrivingNode(Node):
                         self.red_loss_count = 0
 
                 # ===== 주차 판정 =====
-                if 0 < self.park_x and self.park_area >= 1500:
-                    if not self.start_park and not self.park_completed:
+                if 0 < self.park_x:
+                    if not self.start_park:
                         self.count_park += 1
                         if self.count_park >= self.PARK_CONFIRM:
-                            self.start_parking_sequence()
-                        else:
-                            self.get_logger().info(
-                                'park detected: count=%d/%d x=%d area=%d' % (
-                                    self.count_park, self.PARK_CONFIRM, self.park_x, self.park_area))
+                            self.mecanum_pub.publish(Twist())
+                            self.start_park = True
+                            self.stop = True
+                            threading.Thread(target=self.park_action, daemon=True).start()
                 else:
-                    if self.count_park > 0:
-                        self.get_logger().info(
-                            'park lost: count reset from %d to 0' % self.count_park)
                     self.count_park = 0
 
-                # ===== 주차 기동 =====
-                skip_lane = False
-                if self.start_park and not self.park_completed:
-                    self.stop = True
-                    skip_lane = self.update_parking_sequence(twist)
 
                 # ===== 우회전 (bbox anchor + 개루프 회전) =====
                 # 회전 준비(right_pending)가 됐고 횡단보도 정지가 풀리면(stop=False) 그때 회전 시작.
