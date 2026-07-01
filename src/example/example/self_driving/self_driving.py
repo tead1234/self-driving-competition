@@ -443,8 +443,17 @@ class SelfDrivingNode(Node):
                             self.mecanum_pub.publish(Twist())
                             self.start_park = True
                             self.stop = True
+                            self.get_logger().info(
+                                '\033[1;31m%s\033[0m' % 'PARK ACTION START')
                             threading.Thread(target=self.park_action, daemon=True).start()
+                        else:
+                            self.get_logger().info(
+                                'park detected: count=%d/%d x=%d' % (
+                                    self.count_park, self.PARK_CONFIRM, self.park_x))
                 else:
+                    if self.count_park > 0:
+                        self.get_logger().info(
+                            'park lost: count reset from %d to 0' % self.count_park)
                     self.count_park = 0
 
                 # ===== 우회전 (bbox anchor + 개루프 회전) =====
@@ -567,6 +576,8 @@ class SelfDrivingNode(Node):
             elif class_name == 'park':
                 seen_park = True
                 self.park_x = center[0]
+                self.get_logger().info(
+                    '\033[1;34m%s\033[0m' % ('park detected: x=%d box=' % center[0] + str(i.box)))
             elif class_name == 'red' or class_name == 'green':
                 seen_traffic = True
                 self.traffic_signs_status = i
