@@ -135,7 +135,7 @@ class SelfDrivingNode(Node):
         self.NO_LIGHT_TIMEOUT = 3.0        # 신호등을 한 번도 못 봤을 때 통과까지 대기(초)
         self.RED_LOSS_TOLERANCE = 5        # 신호등 깜빡임 허용 프레임 수
         self.CROSSWALK_GONE_CONFIRM = 5    # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
-        self.PARK_CONFIRM = 5              # 주차 시작 전 연속 확인 횟수
+        self.PARK_CONFIRM = 1              # 주차 시작 전 연속 확인 횟수
 
         # ===== 우회전 anchor 상수 (카메라 bbox 기반) =====
         self.RIGHT_APPROACH_Y = 160         # 이 값부터 표지판을 가까운 anchor로 추적
@@ -346,19 +346,21 @@ class SelfDrivingNode(Node):
 
     # ---- 주차 기동 (메인 루프에서 순차 실행) ----
     def park_action(self):
+        self.get_logger().info("park_action 함수 호출")
         self.start_park = True 
         self.stop = True
         self.count_park = 0
         self.get_logger().info('\033[1;31m%s\033[0m' % 'PARK ACTION START')
 
         twist = Twist()
-
-        twist.linear.y = 0.2
+        twist.linear.x = 0.0
+        twist.linear.y = -0.2
 
         self.mecanum_pub.publish(twist)
         time.sleep(1.2)
 
         self.mecanum_pub.publish(Twist())
+        return True
 
     def main(self):
         self.get_logger().info('\033[1;33m%s\033[0m' % "self_driving main start")
@@ -434,15 +436,15 @@ class SelfDrivingNode(Node):
                         self.red_loss_count = 0
 
                 # ===== 주차 판정 =====
-                if 0 < self.park_x and self.park_area > 1000:
-                    if not self.start_park:
-                        self.count_park += 1
-                        if self.count_park >= self.PARK_CONFIRM:
-                            self.mecanum_pub.publish(Twist())
-                            self.start_park = True
-                            self.stop = True
-                            self.park_action()
-                    self.count_park = 0
+                self.get_logger().info(str(self.park_x))
+                if 0 < self.park_x and self.park_area > 2000:
+                    self.count_park += 1
+                    if self.count_park >= self.PARK_CONFIRM:
+                        self.mecanum_pub.publish(Twist())
+                        self.start_park = True
+                        self.stop = True
+                        self.park_action()
+                self.count_park = 0
 
 
                 # ===== 우회전 (bbox anchor + 개루프 회전) =====
