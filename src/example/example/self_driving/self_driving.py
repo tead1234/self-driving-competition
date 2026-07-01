@@ -159,7 +159,7 @@ class SelfDrivingNode(Node):
         self.CROSSWALK_GONE_CONFIRM = (
             5  # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
         )
-        self.PARK_CONFIRM = 5  # 주차 시작 전 연속 확인 횟수
+        self.PARK_CONFIRM = 1  # 주차 시작 전 연속 확인 횟수
 
         # ===== 우회전 anchor 상수 (카메라 bbox 기반) =====
         self.RIGHT_APPROACH_Y = 160  # 이 값부터 표지판을 가까운 anchor로 추적
@@ -421,7 +421,7 @@ class SelfDrivingNode(Node):
             case "turn_start":
                 # 오른쪽 회전 식별시 3회 점멸
                 for _ in range(3):
-                    self.set_rgb([[1, 255, 255, 0], [2, 0, 0, 0]])
+                    self.set_rgb([[1, 0, 0, 0], [2, 255, 255, 0]])
                     time.sleep(0.1)
                     self.set_rgb([[1, 0, 0, 0], [2, 0, 0, 0]])
             # 회전 종료시 rrc led 소등
@@ -489,11 +489,13 @@ class SelfDrivingNode(Node):
                         self.crosswalk_state = "APPROACH"
                         self.approach_enter_time = time.time()
                         self.stop = False
+                        self.led_control("move")
 
                 elif self.crosswalk_state == "APPROACH":
                     approach_time = self.APPROACH_DISTANCE / self.drive_speed
                     if time.time() - self.approach_enter_time < approach_time:
                         self.stop = False
+                        self.led_control("move")
                     else:
                         self.crosswalk_state = "STOPPED"
                         self.stop_enter_time = time.time()
@@ -512,6 +514,7 @@ class SelfDrivingNode(Node):
 
                     if sign == "green":
                         self.stop = False
+                        self.led_control("move")
                         self.crosswalk_state = "PASSED"
                     elif sign == "red":
                         self.stop = True
@@ -528,10 +531,12 @@ class SelfDrivingNode(Node):
                                 > self.NO_LIGHT_TIMEOUT
                             ):
                                 self.stop = False
+                                self.led_control("move")
                                 self.crosswalk_state = "PASSED"
 
                 elif self.crosswalk_state == "PASSED":
                     self.stop = False
+                    self.led_control("move")
                     if self.crosswalk_gone_count >= self.CROSSWALK_GONE_CONFIRM:
                         self.crosswalk_state = "NORMAL"
                         self.traffic_signs_status = None
@@ -547,8 +552,9 @@ class SelfDrivingNode(Node):
                         self.stop = True
                         self.park_action()
                         self.start_park = False
-                        self.stop = True
+                        # self.stop = True
                         self.led_control("stop")
+                        time.sleep(1)
                         self.red_led.off()
                         break
                 else:
