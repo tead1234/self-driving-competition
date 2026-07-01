@@ -356,7 +356,7 @@ class SelfDrivingNode(Node):
         twist.linear.y = 0.2
 
         self.mecanum_pub.publish(twist)
-        time.sleep(1)
+        time.sleep(1.2)
 
         self.mecanum_pub.publish(Twist())
 
@@ -434,22 +434,22 @@ class SelfDrivingNode(Node):
                         self.red_loss_count = 0
 
                 # ===== 주차 판정 =====
-                if 0 < self.park_x:
+                if 0 < self.park_x and self.park_area > 1000:
                     if not self.start_park:
                         self.count_park += 1
                         if self.count_park >= self.PARK_CONFIRM:
                             self.mecanum_pub.publish(Twist())
                             self.start_park = True
                             self.stop = True
-                            threading.Thread(target=self.park_action, daemon=True).start()
-                else:
+                            self.park_action()
                     self.count_park = 0
 
 
                 # ===== 우회전 (bbox anchor + 개루프 회전) =====
                 # 회전 준비(right_pending)가 됐고 횡단보도 정지가 풀리면(stop=False) 그때 회전 시작.
                 # STOPPING 단계 없음: 횡단보도에서 이미 한 번 정지했으므로 추가 정지 안 함.
-                if not skip_lane and self.right_pending and not self.stop and not self.turn_right:
+                skip_lane = False
+                if self.right_pending and not self.stop and not self.turn_right:
                     self.start_right_turn()
 
                 if self.turn_right:
@@ -579,9 +579,9 @@ class SelfDrivingNode(Node):
             self.get_logger().info('crosswalk distinct=%d ys=%s'
                                    % (self.crosswalk_count, str(sorted(crosswalk_ys))))
 
-        if not seen_park:
-            self.park_x = -1
-            self.park_area = 0
+        #if not seen_park:
+        #    self.park_x = -1
+        #    self.park_area = 0
         if not seen_traffic:
             self.traffic_signs_status = None
         self.update_right_turn_anchor(right_metrics)
