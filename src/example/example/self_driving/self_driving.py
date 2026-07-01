@@ -605,6 +605,7 @@ class SelfDrivingNode(Node):
                         self.count_turn += 1
                         if self.count_turn > 8 and not self.start_turn:
                             self.start_turn = True
+
                             self.led_control("turn_start")
                             self.count_turn = 0
                             self.start_turn_time_stamp = time.time()
@@ -619,7 +620,8 @@ class SelfDrivingNode(Node):
                             and self.start_turn
                         ):
                             self.start_turn = False
-                            self.led_control("turn_stop")
+
+                            self.led_control("turn_end")
                         if not self.start_turn:
                             self.pid.SetPoint = 100
                             self.pid.update(lane_x)
