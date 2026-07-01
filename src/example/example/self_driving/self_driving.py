@@ -357,7 +357,7 @@ class SelfDrivingNode(Node):
         twist.linear.y = -0.2
 
         self.mecanum_pub.publish(twist)
-        time.sleep(1.2)
+        time.sleep(2.0)
 
         self.mecanum_pub.publish(Twist())
         return True
@@ -444,6 +444,8 @@ class SelfDrivingNode(Node):
                         self.start_park = True
                         self.stop = True
                         self.park_action()
+                        self.start_park = False
+                        self.stop = True
                 self.count_park = 0
 
 
