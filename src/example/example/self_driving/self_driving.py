@@ -346,7 +346,7 @@ class SelfDrivingNode(Node):
 
     # ---- 주차 기동 (메인 루프에서 순차 실행) ----
     def park_action(self):
-        self.start_park = True
+        self.start_park = True 
         self.stop = True
         self.count_park = 0
         self.get_logger().info('\033[1;31m%s\033[0m' % 'PARK ACTION START')
@@ -358,7 +358,7 @@ class SelfDrivingNode(Node):
 
         self.mecanum_pub.publish(twist)
         time.sleep(2)
-        
+
         return True
 
     def main(self):
