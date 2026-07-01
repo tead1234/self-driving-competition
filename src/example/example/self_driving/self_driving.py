@@ -710,14 +710,16 @@ class SelfDrivingNode(Node):
             elif class_name == "park":
                 seen_park = True
                 self.park_x = center[0]
-                self.park_area = int(abs((i.box[2] - i.box[0]) * (i.box[3] - i.box[1])))  # ← park에서 면적 계산
+                self.park_area = int(abs((i.box[2] - i.box[0]) * (i.box[3] - i.box[1])))
             elif class_name == "red" or class_name == "green":
                 seen_traffic = True
-                self.traffic_signs_status = i                                            # ← 신호등은 여기서만
+                self.traffic_signs_status = i
+                # (여기 있던 crosswalk_count 계산 줄을 삭제)
 
-                self.crosswalk_count = self.count_distinct_crosswalks(
-                    crosswalk_ys, self.CROSSWALK_GAP
-                )
+        # ★ for 루프 밖에서 항상 계산 (신호등 유무와 무관)
+        self.crosswalk_count = self.count_distinct_crosswalks(
+            crosswalk_ys, self.CROSSWALK_GAP
+        )
 
         if crosswalk_ys:
             self.get_logger().info(
@@ -725,9 +727,6 @@ class SelfDrivingNode(Node):
                 % (self.crosswalk_count, str(sorted(crosswalk_ys)))
             )
 
-        # if not seen_park:
-        #    self.park_x = -1
-        #    self.park_area = 0
         if not seen_traffic:
             self.traffic_signs_status = None
         self.update_right_turn_anchor(right_metrics)
