@@ -710,22 +710,14 @@ class SelfDrivingNode(Node):
             elif class_name == "park":
                 seen_park = True
                 self.park_x = center[0]
-            elif class_name == "red" or class_name == "green":
-                self.park_area = int(abs((i.box[2] - i.box[0]) * (i.box[3] - i.box[1])))
-                self.get_logger().info(
-                    "\033[1;34m%s\033[0m"
-                    % (
-                        "park detected: x=%d area=%d box=" % (center[0], self.park_area)
-                        + str(i.box)
-                    )
-                )
+                self.park_area = int(abs((i.box[2] - i.box[0]) * (i.box[3] - i.box[1])))  # ← park에서 면적 계산
             elif class_name == "red" or class_name == "green":
                 seen_traffic = True
-                self.traffic_signs_status = i
+                self.traffic_signs_status = i                                            # ← 신호등은 여기서만
 
-        self.crosswalk_count = self.count_distinct_crosswalks(
-            crosswalk_ys, self.CROSSWALK_GAP
-        )
+                self.crosswalk_count = self.count_distinct_crosswalks(
+                    crosswalk_ys, self.CROSSWALK_GAP
+                )
 
         if crosswalk_ys:
             self.get_logger().info(
