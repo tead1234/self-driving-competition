@@ -26,6 +26,9 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from ros_robot_controller_msgs.msg import BuzzerState, SetPWMServoState, PWMServoState
 
+from gpiozero import LED
+from ros_robot_controller_msgs.msg import RGBStates, RGBState
+
 
 class SelfDrivingNode(Node):
     def __init__(self, name):
@@ -79,6 +82,10 @@ class SelfDrivingNode(Node):
             0.0, self.init_process, callback_group=timer_cb_group
         )
 
+        self.rgb_pub = self.create_publisher(
+            RGBStates, "/ros_robot_controller/set_rgb", 10
+        )
+
     def init_process(self):
         self.timer.cancel()
 
@@ -105,6 +112,7 @@ class SelfDrivingNode(Node):
         self.detect_turn_right = False
         self.detect_far_lane = False
         self.park_x = -1  # 주차 표지 x 픽셀 좌표 (없으면 -1)
+        self.park_area = 0  # 주차 표지 bbox 면적
 
         self.start_turn_time_stamp = 0
         self.count_turn = 0
@@ -114,16 +122,24 @@ class SelfDrivingNode(Node):
         self.count_right_miss = 0
         self.turn_right = False
         self.right_turn_time = 0
-        self.right_turn_done = False  # 우회전 동작이 끝났는지
-        self.right_turn_finish_time = 0  # 우회전 종료 시각
+        self.right_sign_y = 0
+        self.right_sign_center_x = -1
+        self.right_sign_area = 0
+        self.right_turn_state = "IDLE"
+        self.right_seen_close = False
+        self.right_ready_seen = False
+        self.right_lost_count = 0
+        self.right_pending = False  # 회전 준비 완료, 횡단보도 정지 해제를 기다리는 중
 
         self.last_park_detect = False
         self.count_park = 0
         self.stop = False
         self.start_park = False
+        self.park_phase = None
+        self.park_phase_start_time = 0.0
+        self.park_completed = False
 
         self.count_crosswalk = 0
-        self.crosswalk_distance = 0  # 횡단보도 중심 y픽셀 (클수록 가까움)
 
         self.traffic_signs_status = None  # 신호등 상태 기록
         self.red_loss_count = 0
@@ -133,41 +149,44 @@ class SelfDrivingNode(Node):
         self.objects_info = []
 
         # ===== 횡단보도/신호등 상수 (직접 조정) =====
-        self.CROSSWALK_STOP_Y = (
-            215  # box[3] 기준. 값이 클수록 횡단보도에 더 가까이 가서 정지
+        self.CROSSWALK_GAP = (
+            60  # 박스 y중심이 이 픽셀 이상 떨어지면 "별개 횡단보도"로 봄 (실측 후 튜닝)
         )
-        self.CROSSWALK_RELEASE_Y = 185  # 흔들림 방지용 해제 기준(디버그/상태 확인용)
-        self.CROSSWALK_STOP_CONFIRM = 2  # STOP_Y를 연속 몇 프레임 넘으면 정지할지
-        self.crosswalk_stop_count = 0  # STOP_Y 연속 확인 카운터
-
+        self.CROSSWALK_STOP_COUNT = 2  # 별개 횡단보도가 이 개수 이상이면 정지 절차 시작
+        self.APPROACH_DISTANCE = 0.1  # 2개 판단 후 더 전진할 거리(m) ≈ 20cm
         self.NO_LIGHT_TIMEOUT = 3.0  # 신호등을 한 번도 못 봤을 때 통과까지 대기(초)
         self.RED_LOSS_TOLERANCE = 5  # 신호등 깜빡임 허용 프레임 수
         self.CROSSWALK_GONE_CONFIRM = (
             5  # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
         )
-        self.PARK_TRIGGER_Y = 220  # 주차 트리거용 횡단보도 y픽셀 임계
-        self.PARK_CONFIRM = 13  # 주차 시작 전 연속 확인 횟수 유지
+        self.PARK_CONFIRM = 1  # 주차 시작 전 연속 확인 횟수
 
-        # ===== 우회전 이후 주차 진입 안정화 =====
-        self.PARK_AFTER_RIGHT_DELAY = 0.5  # 우회전 종료 후 최소 대기 시간(초)
-        self.LANE_REACQUIRE_CONFIRM = (
-            3  # 우회전 후 차선을 연속 몇 프레임 잡아야 주차 허용할지
-        )
-        self.lane_reacquire_count = 0  # 우회전 후 차선 재검출 카운터
+        # ===== 우회전 anchor 상수 (카메라 bbox 기반) =====
+        self.RIGHT_APPROACH_Y = 90  # 표지판이 화면에 일찍/작게 보여도 anchor 추적 시작
+        self.RIGHT_TURN_TRIGGER_Y = 130  # 박스 하단 y가 이 값 이상이면 회전 준비 완료
+        self.RIGHT_MIN_HEIGHT = 8  # 작은 원거리 bbox도 허용
+        self.RIGHT_MIN_AREA = 80  # APPROACH 진입 최소 bbox 면적 완화
+        self.RIGHT_TURN_MIN_AREA = 150  # 회전 준비 최소 bbox 면적 완화
+        self.RIGHT_CENTER_EXIT_X = 180  # 화면 중앙 근처까지만 와도 회전 준비 가능
+        self.RIGHT_CONFIRM = 1  # 한 프레임만 확인돼도 회전 준비
+        self.RIGHT_PASS_LOST_CONFIRM = 2  # 회전 준비 후 표지판이 사라진 연속 프레임 수
+        self.RIGHT_COOLDOWN_LOST_CONFIRM = 3
+        self.RIGHT_TURN_DURATION = 1.2  # 실제 우회전 기동 시간(초), 개루프
 
-        # ===== 횡단보도 정지 튜닝용 로그 =====
-        self.CROSSWALK_LOG_START_Y = 160  # 이 값 이상부터 터미널 로그 출력
-        self.crosswalk_last_log_time = 0
-        self.CROSSWALK_LOG_INTERVAL = (
-            0.2  # 로그 출력 간격(초). 너무 많이 찍히는 것 방지
-        )
-
-        # 횡단보도 상태머신: 'NORMAL' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
+        # 횡단보도 상태머신: 'NORMAL' -> 'APPROACH' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
         self.crosswalk_state = "NORMAL"
+        self.approach_enter_time = 0  # APPROACH 진입 시각
         self.stop_enter_time = 0  # STOPPED 진입 시각
+        self.crosswalk_count = 0  # 현재 프레임의 "별개 횡단보도" 개수
         self.crosswalk_gone_count = 0  # 횡단보도가 안 보인 연속 프레임 수
 
         self.drive_speed = 0.3
+
+        # 빵판 led에 gpio 할당 및 초기 소등 처리
+        self.blue_led = LED(23)
+        self.red_led = LED(24)
+        self.blue_led.off()
+        self.red_led.off()
 
     def get_node_state(self, request, response):
         response.success = True
@@ -183,7 +202,6 @@ class SelfDrivingNode(Node):
         self.get_logger().info("\033[1;32m%s\033[0m" % "self driving enter")
         with self.lock:
             self.start = False
-            # subscription 객체를 보관해야 exit에서 정리 가능
             self.image_sub = self.create_subscription(
                 Image, "/ascamera/camera_publisher/rgb0/image", self.image_callback, 1
             )
@@ -200,7 +218,6 @@ class SelfDrivingNode(Node):
         self.get_logger().info("\033[1;32m%s\033[0m" % "self driving exit")
         with self.lock:
             try:
-                # ROS2에서는 destroy_subscription 사용 (unregister 아님)
                 if self.image_sub is not None:
                     self.destroy_subscription(self.image_sub)
                 if self.object_sub is not None:
@@ -221,6 +238,9 @@ class SelfDrivingNode(Node):
                 self.mecanum_pub.publish(Twist())
         response.success = True
         response.message = "set_running"
+        # if start driving -> turn on the blue light
+        if self.start:
+            self.led_control("move")
         return response
 
     def shutdown(self, signum, frame):
@@ -233,32 +253,207 @@ class SelfDrivingNode(Node):
             self.image_queue.get()
         self.image_queue.put(rgb_image)
 
-    # ---- 주차 기동 (Ackerman 기준, 개루프) ----
+    def get_right_box_metrics(self, box):
+        x1, y1, x2, y2 = box
+        width = abs(x2 - x1)
+        height = abs(y2 - y1)
+        return {
+            "center_x": int((x1 + x2) / 2),
+            "bottom_y": int(max(y1, y2)),
+            "height": int(height),
+            "area": int(width * height),
+        }
+
+    def start_right_turn(self):
+        self.turn_right = True
+        self.right_turn_time = time.time()
+        self.right_turn_state = "TURNING"
+        self.right_pending = False
+        self.count_right = 0
+        self.count_right_miss = 0
+        self.right_lost_count = 0
+        self.get_logger().info(
+            "right turn start: x=%d y=%d area=%d"
+            % (self.right_sign_center_x, self.right_sign_y, self.right_sign_area)
+        )
+
+    # STOPPING 단계 제거: 회전 준비가 끝나면 즉시 대기 상태로 전환.
+    # 실제 회전 시작은 main에서 횡단보도 정지가 풀린(stop=False) 순간에 이뤄진다.
+    def prepare_right_turn(self):
+        if self.right_turn_state in ("TURNING", "COOLDOWN") or self.right_pending:
+            return
+        self.right_pending = True  # 준비 완료, 횡단보도 정지 해제를 기다림
+        self.count_right = 0
+        self.count_right_miss = 0
+        self.right_lost_count = 0
+        self.get_logger().info(
+            "right turn ready (pending): x=%d y=%d area=%d"
+            % (self.right_sign_center_x, self.right_sign_y, self.right_sign_area)
+        )
+
+    def reset_right_anchor(self):
+        self.right_turn_state = "IDLE"
+        self.right_seen_close = False
+        self.right_ready_seen = False
+        self.right_lost_count = 0
+        self.right_pending = False
+        self.count_right = 0
+        self.right_sign_y = 0
+        self.right_sign_center_x = -1
+        self.right_sign_area = 0
+
+    def update_right_turn_anchor(self, right_metrics):
+        if self.right_turn_state == "TURNING":
+            return
+
+        if right_metrics is None:
+            self.right_sign_y = 0
+            self.right_sign_center_x = -1
+            self.right_sign_area = 0
+            self.count_right_miss += 1
+
+            if self.right_turn_state == "APPROACH":
+                self.right_lost_count += 1
+                if (
+                    self.right_ready_seen
+                    and self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM
+                ):
+                    self.prepare_right_turn()
+                    return
+                if self.right_lost_count >= self.RIGHT_PASS_LOST_CONFIRM:
+                    self.reset_right_anchor()
+                    return
+
+            if self.right_turn_state == "COOLDOWN":
+                if self.count_right_miss >= self.RIGHT_COOLDOWN_LOST_CONFIRM:
+                    self.reset_right_anchor()
+                    self.count_right_miss = 0
+                return
+
+            if self.count_right_miss >= 3:
+                self.count_right = 0
+                self.count_right_miss = 0
+            return
+
+        self.right_sign_y = right_metrics["bottom_y"]
+        self.right_sign_center_x = right_metrics["center_x"]
+        self.right_sign_area = right_metrics["area"]
+        self.count_right_miss = 0
+        self.right_lost_count = 0
+
+        if self.right_turn_state == "COOLDOWN":
+            return
+
+        close_enough = (
+            right_metrics["bottom_y"] >= self.RIGHT_APPROACH_Y
+            or right_metrics["center_x"] >= 80
+        ) and (
+            right_metrics["height"] >= self.RIGHT_MIN_HEIGHT
+            and right_metrics["area"] >= self.RIGHT_MIN_AREA
+        )
+        ready_to_turn = (
+            right_metrics["bottom_y"] >= self.RIGHT_TURN_TRIGGER_Y
+            or right_metrics["center_x"] >= 120
+        ) and (right_metrics["area"] >= self.RIGHT_TURN_MIN_AREA)
+
+        if not close_enough:
+            if self.right_turn_state != "APPROACH":
+                self.count_right = 0
+            return
+
+        self.right_seen_close = True
+        if ready_to_turn:
+            self.right_ready_seen = True
+        if self.right_turn_state == "IDLE":
+            self.right_turn_state = "APPROACH"
+            self.count_right = 1
+            return
+
+        if self.right_turn_state == "APPROACH":
+            self.count_right += 1
+            if self.count_right >= self.RIGHT_CONFIRM:
+                self.prepare_right_turn()
+
+    # ---- 횡단보도 박스들의 y중심으로 "별개 횡단보도" 개수 세기 ----
+    @staticmethod
+    def count_distinct_crosswalks(y_centers, gap):
+        if not y_centers:
+            return 0
+        ys = sorted(y_centers)
+        groups = 1
+        for prev, cur in zip(ys, ys[1:]):
+            if cur - prev > gap:
+                groups += 1
+        return groups
+
+    # ---- 주차 기동 (메인 루프에서 순차 실행) ----
     def park_action(self):
-        # 오른쪽으로 꺾기
-        twist = Twist()
-        twist.linear.x = 0.15
-        twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
-        self.mecanum_pub.publish(twist)
-        time.sleep(3)
-
-        # 왼쪽으로 꺾기
-        twist = Twist()
-        twist.linear.x = 0.15
-        twist.angular.z = -twist.linear.x * math.tan(-0.5061) / 0.145
-        self.mecanum_pub.publish(twist)
-        time.sleep(2)
-
-        # 다시 각도 맞추기
-        twist = Twist()
-        twist.linear.x = 0.15
-        twist.angular.z = twist.linear.x * math.tan(-0.5061) / 0.145
-        self.mecanum_pub.publish(twist)
-        time.sleep(1.5)
-
-        self.mecanum_pub.publish(Twist())
+        self.get_logger().info("park_action 함수 호출")
+        self.start_park = True
         self.stop = True
-        self.get_logger().info("========== PARK FINISHED ==========")
+        self.count_park = 0
+        self.get_logger().info("\033[1;31m%s\033[0m" % "PARK ACTION START")
+
+        twist = Twist()
+        twist.linear.x = 0.0
+        twist.linear.y = -0.2
+
+        self.mecanum_pub.publish(twist)
+        time.sleep(2.0)
+
+        twist.linear.y = 0.0
+
+        self.mecanum_pub.publish(twist)
+        time.sleep(1.0)
+
+        # self.mecanum_pub.publish(Twist())
+        self.led_blink()
+        return True
+
+    def led_control(self, state):
+        match state:
+            case "move":
+                self.red_led.off()
+                self.blue_led.on()
+            case "stop":
+                self.red_led.on()
+                self.blue_led.off()
+            case "turn_start":
+                # 오른쪽 회전 식별시 3회 점멸
+                for _ in range(3):
+                    self.set_rgb([[1, 0, 0, 0], [2, 255, 255, 0]])
+                    time.sleep(0.1)
+                    self.set_rgb([[1, 0, 0, 0], [2, 0, 0, 0]])
+            # 회전 종료시 rrc led 소등
+            case "turn_end":
+                self.set_rgb([[1, 0, 0, 0], [2, 0, 0, 0]])
+
+    # led (소등-> 점등)2번 반복 -> 소등
+    def led_blink(self):
+        for _ in range(2):
+            # 모든 led off
+            self.red_led.off()
+            self.blue_led.off()
+            self.set_rgb([[1, 0, 0, 0], [2, 0, 0, 0]])
+            time.sleep(0.2)
+
+            # 모든 led on
+            self.red_led.on()
+            self.blue_led.on()
+            self.set_rgb([[1, 255, 255, 0], [2, 255, 255, 0]])
+            time.sleep(0.2)
+
+        # 모든 led off
+        self.red_led.off()
+        self.blue_led.off()
+        self.set_rgb([[1, 0, 0, 0], [2, 0, 0, 0]])
+
+    def set_rgb(self, pixels):
+        msg = RGBStates()
+        msg.states = [
+            RGBState(index=idx, red=r, green=g, blue=b) for idx, r, g, b in pixels
+        ]
+        self.rgb_pub.publish(msg)
 
     def main(self):
         self.get_logger().info("\033[1;33m%s\033[0m" % "self_driving main start")
@@ -277,226 +472,147 @@ class SelfDrivingNode(Node):
             if self.start:
                 h, w = image.shape[:2]
 
-                # 차선 이진화
                 binary_image = self.lane_detect.get_binary(image)
 
                 twist = Twist()
                 twist.linear.x = self.drive_speed
 
-                # ===== 횡단보도 사라짐 카운트 =====
-                if self.crosswalk_distance == 0:
+                # ===== 횡단보도 사라짐 카운트 (개수 기반) =====
+                if self.crosswalk_count == 0:
                     self.crosswalk_gone_count += 1
                 else:
                     self.crosswalk_gone_count = 0
 
                 # ===== 횡단보도 + 신호등 상태머신 =====
-                # crosswalk_distance는 실제 cm 거리가 아니라 YOLO crosswalk 박스의 아래쪽 y좌표(box[3])
-                # 값이 클수록 화면 아래쪽에 있다는 뜻이므로 차량이 횡단보도에 더 가까움
-                sign = (
-                    self.traffic_signs_status.class_name
-                    if self.traffic_signs_status is not None
-                    else None
-                )
+                if self.crosswalk_state == "NORMAL":
+                    if self.crosswalk_count >= self.CROSSWALK_STOP_COUNT:
+                        self.crosswalk_state = "APPROACH"
+                        self.approach_enter_time = time.time()
+                        self.stop = False
+                        self.led_control("move")
 
-                # 정지 위치 튜닝용 로그: 횡단보도가 어느 정도 가까워졌을 때만 출력
-                if self.crosswalk_distance >= self.CROSSWALK_LOG_START_Y:
-                    now = time.time()
-                    if (
-                        now - self.crosswalk_last_log_time
-                        >= self.CROSSWALK_LOG_INTERVAL
-                    ):
-                        self.crosswalk_last_log_time = now
-                        self.get_logger().info(
-                            "[CW] y=%d STOP_Y=%d count=%d/%d state=%s sign=%s"
-                            % (
-                                self.crosswalk_distance,
-                                self.CROSSWALK_STOP_Y,
-                                self.crosswalk_stop_count,
-                                self.CROSSWALK_STOP_CONFIRM,
-                                self.crosswalk_state,
-                                sign,
-                            )
-                        )
-
-                if self.start_park:
-                    # 주차 동작 중에는 횡단보도/신호등 정지 로직이 park_action 명령을 방해하지 않게 함
-                    self.stop = False
-
-                elif self.crosswalk_state == "NORMAL":
-                    # 한 프레임만 튀어서 STOP_Y를 넘는 경우를 막기 위해 연속 프레임 확인
-                    if self.crosswalk_distance > self.CROSSWALK_STOP_Y:
-                        self.crosswalk_stop_count += 1
+                elif self.crosswalk_state == "APPROACH":
+                    approach_time = self.APPROACH_DISTANCE / self.drive_speed
+                    if time.time() - self.approach_enter_time < approach_time:
+                        self.stop = False
+                        self.led_control("move")
                     else:
-                        self.crosswalk_stop_count = 0
-
-                    if self.crosswalk_stop_count >= self.CROSSWALK_STOP_CONFIRM:
                         self.crosswalk_state = "STOPPED"
                         self.stop_enter_time = time.time()
                         self.stop = True
+                        self.led_control("stop")
                         self.red_loss_count = 0
-                        self.get_logger().info(
-                            "========== CROSSWALK STOP y=%d STOP_Y=%d =========="
-                            % (self.crosswalk_distance, self.CROSSWALK_STOP_Y)
-                        )
 
                 elif self.crosswalk_state == "STOPPED":
-                    self.stop = True  # 기본은 정지 유지
+                    self.stop = True
+                    self.led_control("stop")
+                    sign = (
+                        self.traffic_signs_status.class_name
+                        if self.traffic_signs_status is not None
+                        else None
+                    )
 
                     if sign == "green":
-                        # 초록불 -> 출발, 이 정지 이벤트 종료
                         self.stop = False
+                        self.led_control("move")
                         self.crosswalk_state = "PASSED"
-                        self.crosswalk_stop_count = 0
-                        self.get_logger().info(
-                            "========== GREEN GO y=%d =========="
-                            % self.crosswalk_distance
-                        )
                     elif sign == "red":
-                        # 빨간불 -> 정지 유지, 타임아웃 리셋(빨간불 오통과 방지)
                         self.stop = True
+                        self.led_control("stop")
                         self.stop_enter_time = time.time()
                         self.red_loss_count = 0
-                        now = time.time()
-                        if (
-                            now - self.crosswalk_last_log_time
-                            >= self.CROSSWALK_LOG_INTERVAL
-                        ):
-                            self.crosswalk_last_log_time = now
-                            self.get_logger().info(
-                                "[CW] RED WAIT y=%d STOP_Y=%d"
-                                % (self.crosswalk_distance, self.CROSSWALK_STOP_Y)
-                            )
                     else:
-                        # 신호등이 안 잡힘: 깜빡임인지 진짜 없는지 구분
                         self.red_loss_count += 1
                         if self.red_loss_count <= self.RED_LOSS_TOLERANCE:
-                            # 깜빡임으로 간주: 정지 유지, 타임아웃 리셋
                             self.stop_enter_time = time.time()
                         else:
-                            # 신호등이 정말 없음: 타임아웃 경과하면 통과
                             if (
                                 time.time() - self.stop_enter_time
                                 > self.NO_LIGHT_TIMEOUT
                             ):
                                 self.stop = False
+                                self.led_control("move")
                                 self.crosswalk_state = "PASSED"
-                                self.crosswalk_stop_count = 0
-                                self.get_logger().info(
-                                    "========== NO LIGHT TIMEOUT GO y=%d =========="
-                                    % self.crosswalk_distance
-                                )
 
                 elif self.crosswalk_state == "PASSED":
-                    # 통과 중: 두 번째 횡단보도가 보여도 멈추지 않음
                     self.stop = False
-                    # 횡단보도 묶음이 완전히 사라지면 다음 횡단보도 대비해 잠금 해제
+                    self.led_control("move")
                     if self.crosswalk_gone_count >= self.CROSSWALK_GONE_CONFIRM:
                         self.crosswalk_state = "NORMAL"
-                        # 다음 횡단보도를 위해 신호등 상태도 리셋
                         self.traffic_signs_status = None
                         self.red_loss_count = 0
-                        self.crosswalk_stop_count = 0
-                        self.get_logger().info("========== CROSSWALK RESET ==========")
-                # ===== 우회전 (개루프) =====
+
+                # ===== 주차 판정 =====
+                self.get_logger().info(str(self.park_x))
+                if 0 < self.park_x and self.park_area > 2000:
+                    self.count_park += 1
+                    if self.count_park >= self.PARK_CONFIRM:
+                        self.mecanum_pub.publish(Twist())
+                        self.start_park = True
+                        self.stop = True
+                        self.park_action()
+                        self.start_park = False
+                        # self.stop = True
+                        self.led_control("stop")
+                        time.sleep(1)
+                        self.red_led.off()
+                        break
+                else:
+                    self.count_park = 0
+
+                # ===== 우회전 (bbox anchor + 개루프 회전) =====
+                # 회전 준비(right_pending)가 됐고 횡단보도 정지가 풀리면(stop=False) 그때 회전 시작.
+                # STOPPING 단계 없음: 횡단보도에서 이미 한 번 정지했으므로 추가 정지 안 함.
                 skip_lane = False
+                if self.right_pending and not self.stop and not self.turn_right:
+                    self.start_right_turn()
+
                 if self.turn_right:
-                    if time.time() - self.right_turn_time < 1:
+                    if time.time() - self.right_turn_time < self.RIGHT_TURN_DURATION:
                         twist.angular.z = -1.0
                         self.mecanum_pub.publish(twist)
-                        skip_lane = True  # 차선 추종만 건너뜀 (루프 전체 X)
+                        skip_lane = True
                     else:
                         self.turn_right = False
-                        self.right_turn_done = True
-                        self.right_turn_finish_time = time.time()
-                        self.lane_reacquire_count = 0
-                        self.get_logger().info(
-                            "========== RIGHT TURN FINISHED =========="
-                        )
+                        self.right_turn_state = "COOLDOWN"
+                        self.right_lost_count = 0
+
                 self.get_logger().info(
-                    "state=%s stop=%s turn_right=%s right_done=%s park=%s skip=%s cw_dist=%d gone=%d"
+                    "state=%s stop=%s turn_right=%s pending=%s skip=%s cw_count=%d gone=%d "
+                    "right_state=%s right_x=%d right_y=%d right_area=%d"
                     % (
                         self.crosswalk_state,
                         self.stop,
                         self.turn_right,
-                        self.right_turn_done,
-                        self.start_park,
+                        self.right_pending,
                         skip_lane,
-                        self.crosswalk_distance,
+                        self.crosswalk_count,
                         self.crosswalk_gone_count,
+                        self.right_turn_state,
+                        self.right_sign_center_x,
+                        self.right_sign_y,
+                        self.right_sign_area,
                     )
                 )
+
                 # ===== 차선 추종 (정지/우회전 중이 아닐 때만) =====
                 result_image, lane_angle, lane_x = self.lane_detect(
                     binary_image, image.copy()
                 )
 
-                # ===== 우회전 이후 주차 진입 조건 =====
-                # 1) 우회전이 끝났고
-                # 2) 우회전 직후 너무 빨리 park를 보지 않도록 약간 기다리고
-                # 3) 차선을 다시 안정적으로 잡은 뒤에만
-                # 4) park 표지판을 PARK_CONFIRM 프레임 연속 확인하면 주차 시작
-                if self.right_turn_done and not self.turn_right and lane_x >= 0:
-                    self.lane_reacquire_count += 1
-                elif not self.right_turn_done:
-                    self.lane_reacquire_count = 0
-
-                park_delay_ok = self.right_turn_done and (
-                    time.time() - self.right_turn_finish_time
-                    >= self.PARK_AFTER_RIGHT_DELAY
-                )
-                lane_ready = self.lane_reacquire_count >= self.LANE_REACQUIRE_CONFIRM
-                park_allowed = park_delay_ok and lane_ready and not self.start_park
-
-                if 0 < self.park_x and park_allowed:
-                    self.count_park += 1
-                    self.get_logger().info(
-                        "[PARK] seen count=%d/%d lane_count=%d/%d park_x=%d"
-                        % (
-                            self.count_park,
-                            self.PARK_CONFIRM,
-                            self.lane_reacquire_count,
-                            self.LANE_REACQUIRE_CONFIRM,
-                            self.park_x,
-                        )
-                    )
-
-                    if self.count_park >= self.PARK_CONFIRM:
-                        self.mecanum_pub.publish(Twist())
-                        self.start_park = True
-                        self.stop = False
-                        self.count_park = 0
-                        self.get_logger().info("========== PARK START ==========")
-                        threading.Thread(target=self.park_action, daemon=True).start()
-                else:
-                    if 0 < self.park_x and not park_allowed:
-                        self.get_logger().info(
-                            "[PARK] ignored right_done=%s delay_ok=%s lane_ready=%s lane_x=%d park_x=%d"
-                            % (
-                                self.right_turn_done,
-                                park_delay_ok,
-                                lane_ready,
-                                lane_x,
-                                self.park_x,
-                            )
-                        )
-                    self.count_park = 0
-
-                if self.start_park:
-                    # 주차 스레드가 /controller/cmd_vel을 직접 publish 중이므로 main 루프에서는 간섭하지 않음
+                if skip_lane:
+                    # 우회전 중: 회전 명령을 정지 명령으로 덮지 않음
                     pass
                 elif self.stop:
-                    # 정지: 멈춤 명령 + PID 누적 제거
                     self.mecanum_pub.publish(Twist())
                     self.pid.clear()
-                elif skip_lane:
-                    # 우회전 중: 차선 추종 건너뜀 (twist는 이미 위에서 publish)
-                    pass
                 elif lane_x >= 0:
                     if lane_x > 120:
-                        # 급커브
                         self.count_turn += 1
-                        if self.count_turn > 5 and not self.start_turn:
+                        if self.count_turn > 8 and not self.start_turn:
                             self.start_turn = True
+
+                            self.led_control("turn_start")
                             self.count_turn = 0
                             self.start_turn_time_stamp = time.time()
                         if self.machine_type != "MentorPi_Acker":
@@ -504,13 +620,14 @@ class SelfDrivingNode(Node):
                         else:
                             twist.angular.z = twist.linear.x * math.tan(-0.9) / 0.145
                     else:
-                        # 직선/완만한 보정: PID
                         self.count_turn = 0
                         if (
                             time.time() - self.start_turn_time_stamp > 2
                             and self.start_turn
                         ):
                             self.start_turn = False
+
+                            self.led_control("turn_end")
                         if not self.start_turn:
                             self.pid.SetPoint = 100
                             self.pid.update(lane_x)
@@ -531,7 +648,6 @@ class SelfDrivingNode(Node):
                                 twist.angular.z = 0.15 * math.tan(-0.5061) / 0.145
                     self.mecanum_pub.publish(twist)
                 else:
-                    # 차선을 못 찾음: PID 누적 제거 (직진 관성 방지)
                     self.pid.clear()
 
                 # ===== 디버그 박스 =====
@@ -569,60 +685,51 @@ class SelfDrivingNode(Node):
     def get_object_callback(self, msg):
         self.objects_info = msg.objects
         if self.objects_info == []:
-            # 아무것도 안 보이면 리셋
             self.traffic_signs_status = None
-            self.crosswalk_distance = 0
-            self.crosswalk_stop_count = 0
+            self.crosswalk_count = 0
             self.park_x = -1
-            self.count_right_miss += 1
-            if self.count_right_miss >= 3:
-                self.count_right = 0
-                self.count_right_miss = 0
+            self.park_area = 0
+            self.update_right_turn_anchor(None)
             return
 
-        min_distance = 0
+        crosswalk_ys = []
         seen_park = False
-        seen_right = False
         seen_traffic = False
-        last_class = None
+        right_metrics = None
 
         for i in self.objects_info:
             class_name = i.class_name
-            last_class = class_name
             center = (int((i.box[0] + i.box[2]) / 2), int((i.box[1] + i.box[3]) / 2))
 
             if class_name == "crosswalk":
-                # 가장 가까운(=y가 가장 큰) 횡단보도 채택
-                bottom_y = i.box[3]  # 중심 대신 박스 하단
-                if bottom_y > min_distance:
-                    min_distance = bottom_y
+                crosswalk_ys.append(center[1])
             elif class_name == "right":
-                seen_right = True
-                self.count_right += 1
-                self.count_right_miss = 0
-                if self.count_right >= 4:
-                    self.turn_right = True
-                    self.right_turn_time = time.time()
-                    self.count_right = 0
+                metrics = self.get_right_box_metrics(i.box)
+                if right_metrics is None or metrics["area"] > right_metrics["area"]:
+                    right_metrics = metrics
             elif class_name == "park":
                 seen_park = True
                 self.park_x = center[0]
+                self.park_area = int(abs((i.box[2] - i.box[0]) * (i.box[3] - i.box[1])))
             elif class_name == "red" or class_name == "green":
                 seen_traffic = True
                 self.traffic_signs_status = i
+                # (여기 있던 crosswalk_count 계산 줄을 삭제)
 
-        # 이 프레임에 안 보인 표지는 정리
-        if not seen_park:
-            self.park_x = -1
+        # ★ for 루프 밖에서 항상 계산 (신호등 유무와 무관)
+        self.crosswalk_count = self.count_distinct_crosswalks(
+            crosswalk_ys, self.CROSSWALK_GAP
+        )
+
+        if crosswalk_ys:
+            self.get_logger().info(
+                "crosswalk distinct=%d ys=%s"
+                % (self.crosswalk_count, str(sorted(crosswalk_ys)))
+            )
+
         if not seen_traffic:
             self.traffic_signs_status = None
-        if not seen_right:
-            self.count_right_miss += 1
-            if self.count_right_miss >= 3:
-                self.count_right = 0
-                self.count_right_miss = 0
-
-        self.crosswalk_distance = min_distance
+        self.update_right_turn_anchor(right_metrics)
 
 
 def main():
