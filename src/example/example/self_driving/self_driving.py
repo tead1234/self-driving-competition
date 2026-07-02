@@ -117,8 +117,8 @@ class SelfDrivingNode(Node):
         self.start_turn = False
 
         # ===== 우회전 (단순화: 크기 조건 만족한 표지를 한 번이라도 보면 기억) =====
-        self.right_seen = False        # 우회전 표지를 (크기 조건 만족하며) 본 적 있음
-        self.turn_right = False        # 실제 회전 중
+        self.right_seen = False  # 우회전 표지를 (크기 조건 만족하며) 본 적 있음
+        self.turn_right = False  # 실제 회전 중
         self.right_turn_time = 0
         self.right_sign_y = 0
         self.right_sign_center_x = -1
@@ -142,20 +142,24 @@ class SelfDrivingNode(Node):
         self.objects_info = []
 
         # ===== 횡단보도/신호등 상수 (직접 조정) =====
-        self.CROSSWALK_GAP = 60            # 박스 y중심이 이 픽셀 이상 떨어지면 "별개 횡단보도"로 봄
-        self.CROSSWALK_STOP_COUNT = 2      # 별개 횡단보도가 이 개수 이상이면 정지 절차 시작
-        self.APPROACH_DISTANCE = 0.1       # 2개 판단 후 더 전진할 거리(m)
-        self.NO_LIGHT_TIMEOUT = 3.0        # 신호등을 한 번도 못 봤을 때 통과까지 대기(초)
-        self.RED_LOSS_TOLERANCE = 5        # 신호등 깜빡임 허용 프레임 수
-        self.CROSSWALK_GONE_CONFIRM = 5    # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
-        self.PARK_CONFIRM = 1              # 주차 시작 전 연속 확인 횟수
+        self.CROSSWALK_GAP = (
+            60  # 박스 y중심이 이 픽셀 이상 떨어지면 "별개 횡단보도"로 봄
+        )
+        self.CROSSWALK_STOP_COUNT = 2  # 별개 횡단보도가 이 개수 이상이면 정지 절차 시작
+        self.APPROACH_DISTANCE = 0.1  # 2개 판단 후 더 전진할 거리(m)
+        self.NO_LIGHT_TIMEOUT = 3.0  # 신호등을 한 번도 못 봤을 때 통과까지 대기(초)
+        self.RED_LOSS_TOLERANCE = 5  # 신호등 깜빡임 허용 프레임 수
+        self.CROSSWALK_GONE_CONFIRM = (
+            5  # 횡단보도가 완전히 사라졌다고 볼 연속 프레임 수
+        )
+        self.PARK_CONFIRM = 1  # 주차 시작 전 연속 확인 횟수
 
         # ===== 우회전 크기 판정 상수 (느슨한 쪽 사용) =====
-        self.RIGHT_TRIGGER_Y = 60         # 박스 하단 y가 이 값 이상
-        self.RIGHT_TRIGGER_AREA = 100      # 박스 면적이 이 값 이상
-        self.RIGHT_TURN_DURATION = 1.0     # 우회전 기동 시간(초), 개루프
-        self.RIGHT_APPROACH_DISTANCE = 0.4   # 회전 전 전진 거리(m), 실측으로 조정
-        self.right_approaching = False       # 회전 전 전진 중
+        self.RIGHT_TRIGGER_Y = 60  # 박스 하단 y가 이 값 이상
+        self.RIGHT_TRIGGER_AREA = 100  # 박스 면적이 이 값 이상
+        self.RIGHT_TURN_DURATION = 1.0  # 우회전 기동 시간(초), 개루프
+        self.RIGHT_APPROACH_DISTANCE = 0.4  # 회전 전 전진 거리(m), 실측으로 조정
+        self.right_approaching = False  # 회전 전 전진 중
         self.right_approach_start = 0
         # 횡단보도 상태머신: 'NORMAL' -> 'APPROACH' -> 'STOPPED' -> 'PASSED' -> 'NORMAL'
         self.crosswalk_state = "NORMAL"
@@ -269,11 +273,10 @@ class SelfDrivingNode(Node):
 
     # ---- 주차 기동 (메인 루프에서 순차 실행) ----
     def park_action(self):
-        self.get_logger().info("park_action 함수 호출")
+        self.get_logger().info("PARK ACTION 시작")
         self.start_park = True
         self.stop = True
         self.count_park = 0
-        self.get_logger().info("\033[1;31m%s\033[0m" % "PARK ACTION START")
 
         twist = Twist()
         twist.linear.x = 0.0
@@ -286,6 +289,7 @@ class SelfDrivingNode(Node):
         time.sleep(1.0)
 
         self.led_blink()
+        self.get_logger().info("PARK ACTION 종료")
         return True
 
     def led_control(self, state):
@@ -374,6 +378,7 @@ class SelfDrivingNode(Node):
                         self.red_loss_count = 0
 
                 elif self.crosswalk_state == "STOPPED":
+                    self.get_logger().info("CROSSWALK에 의한 정지")
                     self.stop = True
                     self.led_control("stop")
                     sign = (
@@ -383,10 +388,12 @@ class SelfDrivingNode(Node):
                     )
 
                     if sign == "green":
+                        self.get_logger().info("신호등 GREEN 탐지")
                         self.stop = False
                         self.led_control("move")
                         self.crosswalk_state = "PASSED"
                     elif sign == "red":
+                        self.get_logger().info("신호등 RED 탐지")
                         self.stop = True
                         self.led_control("stop")
                         self.stop_enter_time = time.time()
@@ -396,7 +403,10 @@ class SelfDrivingNode(Node):
                         if self.red_loss_count <= self.RED_LOSS_TOLERANCE:
                             self.stop_enter_time = time.time()
                         else:
-                            if time.time() - self.stop_enter_time > self.NO_LIGHT_TIMEOUT:
+                            if (
+                                time.time() - self.stop_enter_time
+                                > self.NO_LIGHT_TIMEOUT
+                            ):
                                 self.stop = False
                                 self.led_control("move")
                                 self.crosswalk_state = "PASSED"
@@ -421,6 +431,7 @@ class SelfDrivingNode(Node):
                         self.led_control("stop")
                         time.sleep(1)
                         self.red_led.off()
+                        self.is_running = False
                         break
                 else:
                     self.count_park = 0
@@ -430,7 +441,12 @@ class SelfDrivingNode(Node):
                 # 횡단보도 정지가 풀리면(stop=False) 그때 회전 시작.
                 skip_lane = False
                 # 정지가 풀렸고 우회전 표지를 봤으면 → 먼저 전진 단계 시작
-                if self.right_seen and not self.stop and not self.turn_right and not self.right_approaching:
+                if (
+                    self.right_seen
+                    and not self.stop
+                    and not self.turn_right
+                    and not self.right_approaching
+                ):
                     self.right_approaching = True
                     self.right_approach_start = time.time()
 
@@ -454,10 +470,7 @@ class SelfDrivingNode(Node):
                         self.led_control("turn_end")
 
                 self.get_logger().info(
-                    "turn_right=%s right_seen=%s"
-                    % (
-                        self.turn_right, self.right_seen
-                    )
+                    "turn_right=%s right_seen=%s" % (self.turn_right, self.right_seen)
                 )
 
                 # ===== 차선 추종 (정지/우회전 중이 아닐 때만) =====
@@ -466,6 +479,7 @@ class SelfDrivingNode(Node):
                 )
 
                 if skip_lane:
+                    self.get_logger().info("SKIP LANE")
                     pass
                 elif self.stop:
                     self.mecanum_pub.publish(Twist())
@@ -474,30 +488,30 @@ class SelfDrivingNode(Node):
                     if lane_x > 120:
                         self.count_turn += 1
                         if self.count_turn > 8 and not self.start_turn:
+                            self.get_logger().info("LANE DETECT - TURN RIGHT")
                             self.start_turn = True
                             self.led_control("turn_start")
                             self.count_turn = 0
                             self.start_turn_time_stamp = time.time()
                         if self.machine_type != "MentorPi_Acker":
                             twist.angular.z = -0.9
-                        else:
-                            twist.angular.z = twist.linear.x * math.tan(-0.9) / 0.145
+
                     else:
                         self.count_turn = 0
-                        if time.time() - self.start_turn_time_stamp > 2 and self.start_turn:
+                        if (
+                            time.time() - self.start_turn_time_stamp > 2
+                            and self.start_turn
+                        ):
                             self.start_turn = False
                             self.led_control("turn_end")
                         if not self.start_turn:
                             self.pid.SetPoint = 100
                             self.pid.update(lane_x)
                             if self.machine_type != "MentorPi_Acker":
-                                twist.angular.z = common.set_range(self.pid.output, -0.1, 0.1)
-                            else:
-                                twist.angular.z = (
-                                    twist.linear.x
-                                    * math.tan(common.set_range(self.pid.output, -0.1, 0.1))
-                                    / 0.145
+                                twist.angular.z = common.set_range(
+                                    self.pid.output, -0.1, 0.1
                                 )
+
                         else:
                             if self.machine_type == "MentorPi_Acker":
                                 twist.angular.z = 0.15 * math.tan(-0.5061) / 0.145
@@ -514,7 +528,9 @@ class SelfDrivingNode(Node):
                         cls_id = self.classes.index(class_name)
                         color = colors(cls_id, True)
                         plot_one_box(
-                            box, result_image, color=color,
+                            box,
+                            result_image,
+                            color=color,
                             label="{}:{:.2f}".format(class_name, cls_conf),
                         )
             else:
@@ -554,20 +570,26 @@ class SelfDrivingNode(Node):
 
             if class_name == "crosswalk":
                 crosswalk_ys.append(center[1])
+                self.get_logger().info("CROSSWALK 탐지")
             elif class_name == "right":
+                self.get_logger().info("RIGHT 탐지")
                 metrics = self.get_right_box_metrics(i.box)
                 # 크기 조건 유지: 충분히 크고 가까운 표지만 인정, 한 번 보면 계속 기억
-                if (metrics["bottom_y"] >= self.RIGHT_TRIGGER_Y and
-                        metrics["area"] >= self.RIGHT_TRIGGER_AREA):
+                if (
+                    metrics["bottom_y"] >= self.RIGHT_TRIGGER_Y
+                    and metrics["area"] >= self.RIGHT_TRIGGER_AREA
+                ):
                     self.right_seen = True
                     self.right_sign_center_x = metrics["center_x"]
                     self.right_sign_y = metrics["bottom_y"]
                     self.right_sign_area = metrics["area"]
             elif class_name == "park":
+                self.get_logger().info("PARK 탐지")
                 seen_park = True
                 self.park_x = center[0]
                 self.park_area = int(abs((i.box[2] - i.box[0]) * (i.box[3] - i.box[1])))
             elif class_name == "red" or class_name == "green":
+                self.get_logger().info("신호등 탐지")
                 seen_traffic = True
                 self.traffic_signs_status = i
 
@@ -581,10 +603,6 @@ class SelfDrivingNode(Node):
                 "crosswalk distinct=%d ys=%s"
                 % (self.crosswalk_count, str(sorted(crosswalk_ys)))
             )
-
-        # if not seen_park:
-        #     self.park_x = -1
-        #     self.park_area = 0
         if not seen_traffic:
             self.traffic_signs_status = None
 
