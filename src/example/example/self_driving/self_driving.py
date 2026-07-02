@@ -90,12 +90,12 @@ class SelfDrivingNode(Node):
         self.mecanum_pub.publish(Twist())
         time.sleep(1)
 
-        if 1:  # self.get_parameter('start').value:
+        if 1:
             self.display = True
             self.enter_srv_callback(Trigger.Request(), Trigger.Response())
-            request = SetBool.Request()
-            request.data = True
-            self.set_running_srv_callback(request, SetBool.Response())
+
+            # 처음엔 시작 안함
+            self.start = False
 
         threading.Thread(target=self.main, daemon=True).start()
         self.create_service(Trigger, "~/init_finish", self.get_node_state)
@@ -179,6 +179,8 @@ class SelfDrivingNode(Node):
         self.red_led.off()
         self.right_yellow_led.off()
         self.left_yellow_led.off()
+
+        self.wait_for_green = True   # 시작 전 신호 대기
 
     def get_node_state(self, request, response):
         response.success = True
@@ -568,6 +570,7 @@ class SelfDrivingNode(Node):
                             label="{}:{:.2f}".format(class_name, cls_conf),
                         )
             else:
+                self.mecanum_pub.publish(Twist())   # 계속 정지 명령
                 time.sleep(0.01)
 
             bgr_image = cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
@@ -626,6 +629,18 @@ class SelfDrivingNode(Node):
                 self.get_logger().info("신호등 탐지")
                 seen_traffic = True
                 self.traffic_signs_status = i
+
+                # 출발 시작
+                if self.wait_for_green:
+                    if class_name == "red":
+                        self.get_logger().info("RED - 대기중")
+
+                    elif class_name == "green":
+                        self.get_logger().info("GREEN - 주행 시작")
+
+                        self.wait_for_green = False
+                        self.start = True
+                        self.led_control("move")
 
         # 횡단보도 개수는 신호등 유무와 무관하게 항상 계산 (루프 밖)
         self.crosswalk_count = self.count_distinct_crosswalks(
