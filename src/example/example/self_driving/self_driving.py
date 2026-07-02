@@ -146,7 +146,7 @@ class SelfDrivingNode(Node):
             60  # 박스 y중심이 이 픽셀 이상 떨어지면 "별개 횡단보도"로 봄
         )
         self.CROSSWALK_STOP_COUNT = 2  # 별개 횡단보도가 이 개수 이상이면 정지 절차 시작
-        self.APPROACH_DISTANCE = 0.1  # 2개 판단 후 더 전진할 거리(m)
+        self.APPROACH_DISTANCE = 0.07  # 2개 판단 후 더 전진할 거리(m)
         self.NO_LIGHT_TIMEOUT = 3.0  # 신호등을 한 번도 못 봤을 때 통과까지 대기(초)
         self.RED_LOSS_TOLERANCE = 5  # 신호등 깜빡임 허용 프레임 수
         self.CROSSWALK_GONE_CONFIRM = (
