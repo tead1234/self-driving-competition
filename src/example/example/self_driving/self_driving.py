@@ -301,21 +301,21 @@ class SelfDrivingNode(Node):
                 self.blue_led.on()
                 self.yello_led.off()
 
-                self.set_rgb([[1, 0, 0, 255], [2, 0, 0, 255]])  # 기준 수정
+                # self.set_rgb([[1, 0, 0, 255], [2, 0, 0, 255]])  # 기준 수정
 
             case "stop":
                 self.red_led.on()
                 self.blue_led.off()
                 self.yello_led.off()
 
-                self.set_rgb([[1, 255, 0, 0], [2, 255, 0, 0]])  # 기준 수정
+                # self.set_rgb([[1, 255, 0, 0], [2, 255, 0, 0]])  # 기준 수정
             case "turn_start":
                 for _ in range(3):
                     self.red_led.off()
                     self.blue_led.off()
                     self.yello_led.on()
 
-                    self.set_rgb([[1, 255, 255, 0], [2, 255, 255, 0]])
+                    self.set_rgb([[1, 0, 0, 0], [2, 255, 255, 0]])
                     time.sleep(0.1)
 
                     self.red_led.off()
@@ -329,7 +329,7 @@ class SelfDrivingNode(Node):
                 self.blue_led.on()
                 self.yello_led.off()
 
-                self.set_rgb([[1, 0, 0, 255], [2, 0, 0, 255]])  # 기준 수정
+                # self.set_rgb([[1, 0, 0, 255], [2, 0, 0, 255]])  # 기준 수정
 
     def led_blink(self):
         for _ in range(2):
