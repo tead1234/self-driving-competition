@@ -96,6 +96,7 @@ class SelfDrivingNode(Node):
 
             # 처음엔 시작 안함
             self.start = False
+            self.led_control("stop")
 
         threading.Thread(target=self.main, daemon=True).start()
         self.create_service(Trigger, "~/init_finish", self.get_node_state)
@@ -456,7 +457,7 @@ class SelfDrivingNode(Node):
                         self.red_loss_count = 0
 
                 # ===== 주차 판정 =====
-                if 0 < self.park_x and self.park_area > 1800:
+                if 0 < self.park_x and self.park_area > 1500:
                     self.count_park += 1
                     if self.count_park >= self.PARK_CONFIRM:
                         self.mecanum_pub.publish(Twist())
