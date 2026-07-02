@@ -116,7 +116,7 @@ class SelfDrivingNode(Node):
         self.start_turn_time_stamp = 0
         self.count_turn = 0
         self.start_turn = False
-        self.MIN_STOP_TIME = 1.0   # 횡단보도에서 최소 정지 시간(초)
+        self.MIN_STOP_TIME = 1.0  # 횡단보도에서 최소 정지 시간(초)
         # ===== 우회전 (단순화: 크기 조건 만족한 표지를 한 번이라도 보면 기억) =====
         self.right_seen = False  # 우회전 표지를 (크기 조건 만족하며) 본 적 있음
         self.turn_right = False  # 실제 회전 중
@@ -159,6 +159,7 @@ class SelfDrivingNode(Node):
         self.RIGHT_TRIGGER_Y = 60  # 박스 하단 y가 이 값 이상
         self.RIGHT_TRIGGER_AREA = 100  # 박스 면적이 이 값 이상
         self.RIGHT_TURN_DURATION = 1.0  # 우회전 기동 시간(초), 개루프
+        self.RIGHT_LOAD_TURN_DURATION = 0.6  # 우회전 기동 시간(초), 개루프
         self.RIGHT_APPROACH_DISTANCE = 1.4  # 회전 전 전진 거리(m), 실측으로 조정
         self.right_approaching = False  # 회전 전 전진 중
         self.right_approach_start = 0
@@ -181,7 +182,7 @@ class SelfDrivingNode(Node):
         self.right_yellow_led.off()
         self.left_yellow_led.off()
 
-        self.wait_for_green = True   # 시작 전 신호 대기
+        self.wait_for_green = True  # 시작 전 신호 대기
 
     def get_node_state(self, request, response):
         response.success = True
@@ -424,7 +425,9 @@ class SelfDrivingNode(Node):
                         else None
                     )
                     # 최소 정지 시간이 지났는지
-                    stopped_long_enough = (time.time() - self.stop_enter_time) >= self.MIN_STOP_TIME
+                    stopped_long_enough = (
+                        time.time() - self.stop_enter_time
+                    ) >= self.MIN_STOP_TIME
 
                     if sign == "green":
                         # 초록불이어도 최소 정지 시간은 채운 뒤 출발
@@ -436,14 +439,17 @@ class SelfDrivingNode(Node):
                     elif sign == "red":
                         self.stop = True
                         self.led_control("stop")
-                        self.stop_enter_time = time.time()   # 빨간불은 타임아웃 리셋
+                        self.stop_enter_time = time.time()  # 빨간불은 타임아웃 리셋
                         self.red_loss_count = 0
                     else:
                         self.red_loss_count += 1
                         if self.red_loss_count <= self.RED_LOSS_TOLERANCE:
                             self.stop_enter_time = time.time()
                         else:
-                            if time.time() - self.stop_enter_time > self.NO_LIGHT_TIMEOUT:
+                            if (
+                                time.time() - self.stop_enter_time
+                                > self.NO_LIGHT_TIMEOUT
+                            ):
                                 self.stop = False
                                 self.led_control("move")
                                 self.crosswalk_state = "PASSED"
@@ -487,7 +493,15 @@ class SelfDrivingNode(Node):
 
                 # 전진 단계: 정해진 거리만큼 차선 추종으로 전진 후 회전 시작
                 if self.right_approaching:
-                    self.get_logger().info("approaching=%s turn_right=%s lane_x=%s stop=%s" % (self.right_approaching, self.turn_right, str(lane_x), self.stop))
+                    self.get_logger().info(
+                        "approaching=%s turn_right=%s lane_x=%s stop=%s"
+                        % (
+                            self.right_approaching,
+                            self.turn_right,
+                            str(lane_x),
+                            self.stop,
+                        )
+                    )
                     approach_time = self.RIGHT_APPROACH_DISTANCE / self.drive_speed
                     if time.time() - self.right_approach_start >= approach_time:
                         self.right_approaching = False
@@ -495,7 +509,10 @@ class SelfDrivingNode(Node):
                     # 전진 중에는 skip_lane을 걸지 않음 → 아래 차선 추종이 전진 담당
 
                 if self.turn_right:
-                    if time.time() - self.right_turn_time < self.RIGHT_TURN_DURATION:
+                    if (
+                        time.time() - self.right_turn_time
+                        < self.RIGHT_LOAD_TURN_DURATION
+                    ):
                         twist.angular.z = -1.0
                         self.mecanum_pub.publish(twist)
                         skip_lane = True
@@ -570,7 +587,7 @@ class SelfDrivingNode(Node):
                             label="{}:{:.2f}".format(class_name, cls_conf),
                         )
             else:
-                self.mecanum_pub.publish(Twist())   # 계속 정지 명령
+                self.mecanum_pub.publish(Twist())  # 계속 정지 명령
                 time.sleep(0.01)
 
             bgr_image = cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR)
