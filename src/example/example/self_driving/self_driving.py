@@ -485,15 +485,7 @@ class SelfDrivingNode(Node):
 
                 # 전진 단계: 정해진 거리만큼 차선 추종으로 전진 후 회전 시작
                 if self.right_approaching:
-                    self.get_logger().info(
-                        "approaching=%s turn_right=%s lane_x=%s stop=%s"
-                        % (
-                            self.right_approaching,
-                            self.turn_right,
-                            str(lane_x),
-                            self.stop,
-                        )
-                    )
+                    self.get_logger().info("approaching=%s turn_right=%s lane_x=%s stop=%s" % (self.right_approaching, self.turn_right, str(lane_x), self.stop))
                     approach_time = self.RIGHT_APPROACH_DISTANCE / self.drive_speed
                     if time.time() - self.right_approach_start >= approach_time:
                         self.right_approaching = False
