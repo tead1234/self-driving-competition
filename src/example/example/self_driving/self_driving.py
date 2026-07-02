@@ -446,7 +446,7 @@ class SelfDrivingNode(Node):
                         self.red_loss_count = 0
 
                 # ===== 주차 판정 =====
-                if 0 < self.park_x and self.park_area > 2000:
+                if 0 < self.park_x and self.park_area > 1800:
                     self.count_park += 1
                     if self.count_park >= self.PARK_CONFIRM:
                         self.mecanum_pub.publish(Twist())
