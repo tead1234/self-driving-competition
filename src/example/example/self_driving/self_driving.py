@@ -115,7 +115,7 @@ class SelfDrivingNode(Node):
         self.start_turn_time_stamp = 0
         self.count_turn = 0
         self.start_turn = False
-
+        self.MIN_STOP_TIME = 1.0   # 횡단보도에서 최소 정지 시간(초)
         # ===== 우회전 (단순화: 크기 조건 만족한 표지를 한 번이라도 보면 기억) =====
         self.right_seen = False  # 우회전 표지를 (크기 조건 만족하며) 본 적 있음
         self.turn_right = False  # 실제 회전 중
@@ -415,7 +415,6 @@ class SelfDrivingNode(Node):
                         self.red_loss_count = 0
 
                 elif self.crosswalk_state == "STOPPED":
-                    self.get_logger().info("CROSSWALK에 의한 정지")
                     self.stop = True
                     self.led_control("stop")
                     sign = (
@@ -423,27 +422,27 @@ class SelfDrivingNode(Node):
                         if self.traffic_signs_status is not None
                         else None
                     )
+                    # 최소 정지 시간이 지났는지
+                    stopped_long_enough = (time.time() - self.stop_enter_time) >= self.MIN_STOP_TIME
 
                     if sign == "green":
-                        self.get_logger().info("신호등 GREEN 탐지")
-                        self.stop = False
-                        self.led_control("move")
-                        self.crosswalk_state = "PASSED"
+                        # 초록불이어도 최소 정지 시간은 채운 뒤 출발
+                        if stopped_long_enough:
+                            self.stop = False
+                            self.led_control("move")
+                            self.crosswalk_state = "PASSED"
+                        # 아직 1초 안 됐으면 계속 정지 (다음 프레임에 다시 확인)
                     elif sign == "red":
-                        self.get_logger().info("신호등 RED 탐지")
                         self.stop = True
                         self.led_control("stop")
-                        self.stop_enter_time = time.time()
+                        self.stop_enter_time = time.time()   # 빨간불은 타임아웃 리셋
                         self.red_loss_count = 0
                     else:
                         self.red_loss_count += 1
                         if self.red_loss_count <= self.RED_LOSS_TOLERANCE:
                             self.stop_enter_time = time.time()
                         else:
-                            if (
-                                time.time() - self.stop_enter_time
-                                > self.NO_LIGHT_TIMEOUT
-                            ):
+                            if time.time() - self.stop_enter_time > self.NO_LIGHT_TIMEOUT:
                                 self.stop = False
                                 self.led_control("move")
                                 self.crosswalk_state = "PASSED"
